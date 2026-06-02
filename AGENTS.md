@@ -2,7 +2,7 @@
 
 ## identity
 
-zig mcp agent for computer control. speaks mcp over stdio, http sse, or p2p encrypted tunnel.
+zig mcp agent for computer control. speaks mcp over stdio, http sse, or Cloudflare signaling plus local http.
 self-contained binary, no external dependencies. native macos menu bar app in zig (appkit via @cimport).
 
 ## build
@@ -22,8 +22,7 @@ src/
 ├── main.zig        entry, cli args (--mode, --http, --p2p, --signal-server, --room)
 ├── mcp.zig         stdio mcp transport (init, tools/list, tools/call, ping, notifications)
 ├── http.zig        http sse transport (GET /sse, POST /message, GET /health)
-├── p2p.zig         p2p: noise_xk handshake + xchacha20-poly1305 frames,
-│                   Cloudflare Workers signaling client
+├── p2p.zig         Cloudflare Workers signaling client, WebSocket join, frame helpers
 ├── shell.zig       shell execution engine (fork/exec, pipe)
 ├── tools.zig       tool table (9 tools), access mode gating, safe cmd list
 └── mac_app.zig     macOS menu bar app (AppKit: NSStatusBar, NSMenu, NSImageView)
@@ -53,7 +52,7 @@ folk_tell, folk_screenshot
 
 - stdio: default. standard mcp over stdin/stdout with content-length framing
 - http sse: --http <port>. GET /sse (events), POST /message (calls), GET /health
-- p2p: --p2p. websocket -> cf signaling server -> noise_xk handshake -> encrypted frames.
+- p2p: --p2p. websocket -> cf signaling server, then local HTTP MCP on 8080 by default.
   --signal-server <url> for custom server, --room <name> for room selection.
 
 ## signaling server (Cloudflare)
@@ -64,7 +63,7 @@ signal-server/ is a standalone TypeScript project. deploy:
 The worker creates Durable Objects per room. WebSocket-based signaling:
 - join/leave broadcast
 - offer/answer relay for connection metadata
-- relay fallback for NAT-traversed encrypted data
+- relay messages for future NAT-traversed encrypted data
 
 ## development notes
 
@@ -72,6 +71,6 @@ The worker creates Durable Objects per room. WebSocket-based signaling:
 - no package manager. all deps inline.
 - macos target primary (osascript, screencapture, pbcopy/pbpaste, appkit).
 - mac_app.zig uses @cImport with Cocoa/ApplicationServices frameworks.
-- p2p transport is unavailable in the daemon until a WebSocket client and Noise handshake are wired.
-- signal-server fully functional: deploy for future tunnel work; use --http today.
+- p2p signaling is wired; full encrypted peer MCP relay still needs session/tunnel work.
+- signal-server fully functional: deploy for signaling; use --http for the local MCP endpoint.
 - linux fallback possible via xdotool/etc (no menu bar app).

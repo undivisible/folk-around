@@ -56,14 +56,8 @@ pub fn main(init: std.process.Init.Minimal) !void {
             .enabled = true,
             .signal_url = url,
             .room = room orelse "default",
-        });
-        pm.start() catch |err| {
-            if (err == error.UnsupportedP2PTransport) {
-                std.debug.print("p2p transport is unavailable in this build; use --http <port> with SSH or Tailscale\n", .{});
-                std.process.exit(1);
-            }
-            return err;
-        };
+        }, verbose);
+        try pm.start();
         defer pm.stop();
         // Also start HTTP for local MCP client access
         try http_transport.run(allocator, verbose, &tool_table, @intCast(http_port orelse 8080));
@@ -84,7 +78,7 @@ fn printHelp() !void {
         \\  --verbose           Show tool calls
         \\  --mode <mode>       full, limited, sandbox (default: full)
         \\  --http <port>       HTTP SSE transport (e.g. --http 8080)
-        \\  --p2p               P2P mode (uses CF signaling server)
+        \\  --p2p               Join CF signaling server and expose local HTTP
         \\  --signal-server <url>  Custom signaling server URL
         \\  --room <name>       P2P room name (default: "default")
         \\  --help              This help
@@ -92,7 +86,7 @@ fn printHelp() !void {
         \\Transports:
         \\  stdio     default, pipe to any MCP client
         \\  --http    HTTP SSE for remote over Tailscale/SSH
-        \\  --p2p     P2P encrypted tunnel via signaling server
+        \\  --p2p     Signaling server registration plus local HTTP MCP
         \\
     , .{});
 }

@@ -1,6 +1,6 @@
 # folk-around
 
-Zig MCP agent for computer control. Shell, accessibility, clipboard, files, osascript — over stdio, HTTP SSE, or P2P encrypted tunnel. Native macOS menu bar app, also in Zig.
+Zig MCP agent for computer control. Shell, accessibility, clipboard, files, osascript — over stdio, HTTP SSE, or Cloudflare signaling plus local HTTP. Native macOS menu bar app, also in Zig.
 
 ## what it is
 
@@ -10,7 +10,7 @@ Self-contained binary that speaks the [Model Context Protocol](https://modelcont
 folk-around                              # stdio, full access
 folk-around --http 8080                  # HTTP SSE, remote via SSH/Tailscale
 folk-around --mode sandbox               # restricted mode
-folk-around --p2p                        # P2P encrypted tunnel
+folk-around --p2p                        # join signaling, serve local HTTP
 ```
 
 ## tools
@@ -36,7 +36,7 @@ Standard MCP over stdin/stdout. Pipe to any MCP client.
 `folk-around --http 8080` — runs an HTTP server with SSE. Clients connect at `http://localhost:8080/sse`. Tunnel via `ssh -L` or Tailscale for remote access.
 
 ### P2P
-`folk-around --p2p` currently exits with an unavailable transport message. The Cloudflare Workers signaling server can still be deployed for future tunnel work:
+`folk-around --p2p` or `folk-around --signal-server <host>` joins a Cloudflare Workers signaling room over WebSocket, announces this daemon identity, and starts local HTTP MCP on port 8080 by default. Full encrypted peer-to-peer MCP relay is still future work.
 
 ```bash
 cd signal-server
@@ -44,9 +44,9 @@ bun install
 bunx wrangler deploy
 ```
 
-Point folk-around at HTTP mode for remote use today:
+Point folk-around at a custom signaling host:
 ```bash
-folk-around --http 8080
+folk-around --signal-server https://your-worker.workers.dev --room my-room
 ```
 
 ## macOS menu bar app (Zig, no Xcode)

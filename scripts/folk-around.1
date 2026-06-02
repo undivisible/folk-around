@@ -1,7 +1,7 @@
 # Documentation for /usr/local/bin/folk-around
 
 folk-around is an MCP (Model Context Protocol) daemon for computer control.
-It speaks MCP over stdio or HTTP SSE. Written in Zig.
+It speaks MCP over stdio, HTTP SSE, or Cloudflare signaling plus local HTTP. Written in Zig.
 
 ## Usage
 
@@ -11,6 +11,9 @@ Options:
   --verbose      Show tool calls
   --mode <mode>  Security mode: full, limited, sandbox
   --http <port>  HTTP SSE transport mode (e.g. 8080)
+  --p2p          Join default signaling server and start local HTTP
+  --signal-server <url>  Custom signaling server URL
+  --room <name>  Signaling room name
   --help         This help
 
 ## Modes
@@ -29,10 +32,12 @@ folk_tell, folk_screenshot
 
 stdio (default): MCP protocol over stdin/stdout. Pipe to any MCP client.
 HTTP SSE: Use --http <port>. GET /sse for events, POST /message for calls.
+Signaling: Use --p2p or --signal-server <url>. Joins /signal/<room> and starts local HTTP MCP.
 
 ## Examples
 
   folk-around                                          # stdio mode, full access
   folk-around --mode sandbox                          # sandbox mode
   folk-around --http 8080                             # HTTP SSE on port 8080
+  folk-around --signal-server folkaround.undivisible.dev
   echo '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | folk-around
