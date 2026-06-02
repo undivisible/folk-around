@@ -2,6 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 const mcp = @import("mcp.zig");
+const http_transport = @import("http.zig");
 const shell = @import("shell.zig");
 const tools = @import("tools.zig");
 
@@ -15,11 +16,13 @@ pub fn main() !void {
 
     var verbose = false;
     var mode_name: ?[]const u8 = null;
+    var http_port: ?u16 = null;
 
     var i: usize = 1;
     while (i < args.len) : (i += 1) {
         if (std.mem.eql(u8, args[i], "--verbose") or std.mem.eql(u8, args[i], "-v")) verbose = true
         else if (std.mem.eql(u8, args[i], "--mode")) { i += 1; if (i < args.len) mode_name = args[i]; }
+        else if (std.mem.eql(u8, args[i], "--http")) { i += 1; if (i < args.len) http_port = std.fmt.parseUnsigned(u16, args[i], 10) catch null; }
         else if (std.mem.eql(u8, args[i], "--help") or std.mem.eql(u8, args[i], "-h")) {
             return printHelp();
         }
@@ -30,14 +33,16 @@ pub fn main() !void {
         std.process.exit(1);
     };
 
-    if (verbose) {
-        std.debug.print("[folk] starting (mode={s})\n", .{@tagName(mode)});
-    }
-
     var tool_table = tools.ToolTable.init(allocator, mode);
     defer tool_table.deinit();
 
-    try mcp.run(allocator, verbose, &tool_table);
+    if (http_port) |port| {
+        if (verbose) std.debug.print("[folk] HTTP SSE mode on port {d}\n", .{port});
+        try http_transport.run(allocator, verbose, &tool_table, port);
+    } else {
+        if (verbose) std.debug.print("[folk] stdio mode (mode={s})\n", .{@tagName(mode)});
+        try mcp.run(allocator, verbose, &tool_table);
+    }
 }
 
 fn printHelp() !void {
@@ -47,6 +52,7 @@ fn printHelp() !void {
         \\Usage: folk-around [options]
         \\  --verbose      Show tool calls
         \\  --mode <mode>  full, limited, sandbox
+        \\  --http <port>  HTTP SSE transport mode (e.g. --http 8080)
         \\  --help         This help
         \\
     , .{});

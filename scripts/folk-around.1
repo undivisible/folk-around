@@ -1,0 +1,38 @@
+# Documentation for /usr/local/bin/folk-around
+
+folk-around is an MCP (Model Context Protocol) daemon for computer control.
+It speaks MCP over stdio or HTTP SSE. Written in Zig.
+
+## Usage
+
+    folk-around [options]
+
+Options:
+  --verbose      Show tool calls
+  --mode <mode>  Security mode: full, limited, sandbox
+  --http <port>  HTTP SSE transport mode (e.g. 8080)
+  --help         This help
+
+## Modes
+
+full — unrestricted shell, full access
+limited — read-only shell commands, no write
+sandbox — no shell, a11y + file ops only
+
+## Tools
+
+folk_shell, folk_system_info, folk_list_apps, folk_spawn,
+folk_clipboard_read, folk_clipboard_write, folk_osascript,
+folk_tell, folk_screenshot
+
+## Transports
+
+stdio (default): MCP protocol over stdin/stdout. Pipe to any MCP client.
+HTTP SSE: Use --http <port>. GET /sse for events, POST /message for calls.
+
+## Examples
+
+  folk-around                                          # stdio mode, full access
+  folk-around --mode sandbox                          # sandbox mode
+  folk-around --http 8080                             # HTTP SSE on port 8080
+  echo '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | folk-around
