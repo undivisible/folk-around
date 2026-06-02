@@ -14,6 +14,19 @@ fn sendResponse(writer: *std.Io.Writer, status: u16, reason: []const u8, content
     try writer.flush();
 }
 
+fn sendSse(io: std.Io, writer: *std.Io.Writer) !void {
+    try writer.writeAll(
+        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\naccess-control-allow-origin: *\r\naccess-control-allow-headers: content-type\r\naccess-control-allow-methods: GET, POST, OPTIONS\r\nconnection: keep-alive\r\n\r\n",
+    );
+    try writer.writeAll("event: endpoint\ndata: /message\n\n");
+    try writer.flush();
+    while (true) {
+        std.Io.sleep(io, .fromSeconds(15), .awake) catch return;
+        writer.writeAll(": keepalive\n\n") catch return;
+        writer.flush() catch return;
+    }
+}
+
 fn findHeaderEnd(request: []const u8) ?struct { offset: usize, len: usize } {
     if (std.mem.indexOf(u8, request, "\r\n\r\n")) |offset| return .{ .offset = offset, .len = 4 };
     if (std.mem.indexOf(u8, request, "\n\n")) |offset| return .{ .offset = offset, .len = 2 };
@@ -60,6 +73,13 @@ fn readRequest(allocator: Allocator, stream: std.Io.net.Stream) ![]u8 {
     return try request.toOwnedSlice(allocator);
 }
 
+const ClientContext = struct {
+    allocator: Allocator,
+    verbose: bool,
+    table: *tools.ToolTable,
+    stream: std.Io.net.Stream,
+};
+
 fn handlePost(allocator: Allocator, verbose: bool, table: *tools.ToolTable, writer: *std.Io.Writer, request: []const u8) !void {
     const end = findHeaderEnd(request) orelse {
         try sendResponse(writer, 400, "Bad Request", "text/plain", "missing headers");
@@ -72,21 +92,63 @@ fn handlePost(allocator: Allocator, verbose: bool, table: *tools.ToolTable, writ
         return;
     }
 
-    const msg = std.json.parseFromSliceLeaky(Value, allocator, request[body_start .. body_start + len], .{}) catch {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const message_allocator = arena.allocator();
+
+    const msg = std.json.parseFromSliceLeaky(Value, message_allocator, request[body_start .. body_start + len], .{}) catch {
         try sendResponse(writer, 400, "Bad Request", "text/plain", "invalid json");
         return;
     };
 
-    const out = try mcp.handleMessage(allocator, verbose, table, msg) orelse {
+    const out = try mcp.handleMessage(message_allocator, verbose, table, msg) orelse {
         try sendResponse(writer, 202, "Accepted", "text/plain", "accepted");
         return;
     };
-    defer allocator.free(out);
     try sendResponse(writer, 200, "OK", "application/json", out);
 }
 
+fn handleClient(ctx: *ClientContext) void {
+    const allocator = ctx.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    defer ctx.stream.close(io);
+    defer allocator.destroy(ctx);
+
+    var write_buffer: [8192]u8 = undefined;
+    var writer_state = ctx.stream.writer(io, &write_buffer);
+    const writer = &writer_state.interface;
+
+    const request = readRequest(allocator, ctx.stream) catch {
+        sendResponse(writer, 400, "Bad Request", "text/plain", "bad request") catch {};
+        return;
+    };
+    defer allocator.free(request);
+
+    var lines = std.mem.splitScalar(u8, request, '\n');
+    const request_line = std.mem.trim(u8, lines.next() orelse "", " \t\r\n");
+    var parts = std.mem.splitScalar(u8, request_line, ' ');
+    const method = parts.next() orelse "";
+    const path = parts.next() orelse "";
+
+    if (std.mem.eql(u8, method, "OPTIONS")) {
+        sendResponse(writer, 204, "No Content", "text/plain", "") catch {};
+    } else if (std.mem.eql(u8, method, "GET") and std.mem.eql(u8, path, "/health")) {
+        sendResponse(writer, 200, "OK", "text/plain", "ok") catch {};
+    } else if (std.mem.eql(u8, method, "GET") and std.mem.eql(u8, path, "/sse")) {
+        sendSse(io, writer) catch {};
+    } else if (std.mem.eql(u8, method, "POST") and std.mem.eql(u8, path, "/message")) {
+        handlePost(allocator, ctx.verbose, ctx.table, writer, request) catch {};
+    } else {
+        sendResponse(writer, 404, "Not Found", "text/plain", "not found") catch {};
+    }
+}
+
 pub fn run(allocator: std.mem.Allocator, verbose: bool, table: *tools.ToolTable, port: u16) !void {
-    const io = std.Io.Threaded.global_single_threaded.io();
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
     var address: std.Io.net.IpAddress = .{ .ip4 = std.Io.net.Ip4Address.unspecified(port) };
     var server = try address.listen(io, .{ .reuse_address = true });
     defer server.deinit(io);
@@ -95,34 +157,18 @@ pub fn run(allocator: std.mem.Allocator, verbose: bool, table: *tools.ToolTable,
 
     while (true) {
         const stream = try server.accept(io);
-        defer stream.close(io);
-
-        var write_buffer: [8192]u8 = undefined;
-        var writer_state = stream.writer(io, &write_buffer);
-        const writer = &writer_state.interface;
-
-        const request = readRequest(allocator, stream) catch {
-            try sendResponse(writer, 400, "Bad Request", "text/plain", "bad request");
+        const ctx = try allocator.create(ClientContext);
+        ctx.* = .{
+            .allocator = allocator,
+            .verbose = verbose,
+            .table = table,
+            .stream = stream,
+        };
+        const thread = std.Thread.spawn(.{}, handleClient, .{ctx}) catch {
+            stream.close(io);
+            allocator.destroy(ctx);
             continue;
         };
-        defer allocator.free(request);
-
-        var lines = std.mem.splitScalar(u8, request, '\n');
-        const request_line = std.mem.trim(u8, lines.next() orelse "", " \t\r\n");
-        var parts = std.mem.splitScalar(u8, request_line, ' ');
-        const method = parts.next() orelse "";
-        const path = parts.next() orelse "";
-
-        if (std.mem.eql(u8, method, "OPTIONS")) {
-            try sendResponse(writer, 204, "No Content", "text/plain", "");
-        } else if (std.mem.eql(u8, method, "GET") and std.mem.eql(u8, path, "/health")) {
-            try sendResponse(writer, 200, "OK", "text/plain", "ok");
-        } else if (std.mem.eql(u8, method, "GET") and std.mem.eql(u8, path, "/sse")) {
-            try sendResponse(writer, 200, "OK", "text/event-stream", "event: endpoint\ndata: /message\n\n");
-        } else if (std.mem.eql(u8, method, "POST") and std.mem.eql(u8, path, "/message")) {
-            try handlePost(allocator, verbose, table, writer, request);
-        } else {
-            try sendResponse(writer, 404, "Not Found", "text/plain", "not found");
-        }
+        thread.detach();
     }
 }

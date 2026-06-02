@@ -27,6 +27,17 @@ export interface Env {
   SIGNAL_ROOM: DurableObjectNamespace;
 }
 
+const identityPattern = /^[0-9a-f]{64}$/i;
+const maxMessageBytes = 256 * 1024;
+
+function isIdentity(value: unknown): value is string {
+  return typeof value === "string" && identityPattern.test(value);
+}
+
+function messageSize(value: unknown): number {
+  return new TextEncoder().encode(JSON.stringify(value)).length;
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
@@ -99,9 +110,9 @@ export class SignalRoom implements DurableObject {
     switch (msg.type) {
       case "join": {
         const identity = msg.identity as string;
-        if (!identity) {
+        if (!isIdentity(identity)) {
           server.send(
-            JSON.stringify({ type: "error", message: "Missing identity" }),
+            JSON.stringify({ type: "error", message: "Invalid identity" }),
           );
           return;
         }
@@ -124,6 +135,18 @@ export class SignalRoom implements DurableObject {
 
       case "offer":
       case "answer": {
+        if (!isIdentity(msg.from) || !isIdentity(msg.to)) {
+          server.send(
+            JSON.stringify({ type: "error", message: "Invalid peer identity" }),
+          );
+          return;
+        }
+        if (messageSize(msg.data) > maxMessageBytes) {
+          server.send(
+            JSON.stringify({ type: "error", message: "Message too large" }),
+          );
+          return;
+        }
         const targetPeer = this.peers.get(msg.to);
         if (targetPeer) {
           targetPeer.send(
@@ -138,6 +161,18 @@ export class SignalRoom implements DurableObject {
       }
 
       case "relay": {
+        if (!isIdentity(msg.from) || !isIdentity(msg.to)) {
+          server.send(
+            JSON.stringify({ type: "error", message: "Invalid peer identity" }),
+          );
+          return;
+        }
+        if (messageSize(msg.data) > maxMessageBytes) {
+          server.send(
+            JSON.stringify({ type: "error", message: "Message too large" }),
+          );
+          return;
+        }
         // Relay encrypted data to a specific peer (NAT fallback)
         const targetPeer = this.peers.get(msg.to);
         if (targetPeer) {

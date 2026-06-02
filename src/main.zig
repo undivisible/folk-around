@@ -13,11 +13,16 @@ var global_verbose = false;
 
 fn relayHandler(alloc: std.mem.Allocator, msg_json: []const u8) !?[]u8 {
     const table = global_tool_table orelse return null;
-    const msg = std.json.parseFromSliceLeaky(std.json.Value, alloc, msg_json, .{}) catch |err| {
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const message_allocator = arena.allocator();
+
+    const msg = std.json.parseFromSliceLeaky(std.json.Value, message_allocator, msg_json, .{}) catch |err| {
         if (global_verbose) std.debug.print("[folk] relay json err: {s}\n", .{@errorName(err)});
         return null;
     };
-    return try mcp.handleMessage(alloc, global_verbose, table, msg);
+    const out = try mcp.handleMessage(message_allocator, global_verbose, table, msg) orelse return null;
+    return try alloc.dupe(u8, out);
 }
 
 pub fn main(init: std.process.Init.Minimal) !void {

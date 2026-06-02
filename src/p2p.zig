@@ -138,6 +138,7 @@ pub const P2PManager = struct {
         defer self.allocator.free(message);
         if (self.verbose) std.debug.print("[folk] signaling recv: {s}\n", .{message});
         if (std.mem.indexOf(u8, message, "\"type\":\"joined\"") == null) return error.SignalJoinRejected;
+        try self.handleSignalMessage(conn, io, message);
 
         while (self.running) {
             const next = readServerMessage(self.allocator, conn) catch |err| switch (err) {
@@ -152,9 +153,23 @@ pub const P2PManager = struct {
     }
 
     fn handleSignalMessage(self: *P2PManager, conn: *std.http.Client.Connection, io: std.Io, raw: []const u8) !void {
-        const parsed = try std.json.parseFromSliceLeaky(std.json.Value, self.allocator, raw, .{});
+        var arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena.deinit();
+        const message_allocator = arena.allocator();
+
+        const parsed = try std.json.parseFromSliceLeaky(std.json.Value, message_allocator, raw, .{});
         if (parsed != .object) return;
         const msg_type = (parsed.object.get("type") orelse return).string;
+
+        if (std.mem.eql(u8, msg_type, "joined")) {
+            const peers = parsed.object.get("peers") orelse return;
+            if (peers != .array) return;
+            for (peers.array.items) |peer| {
+                if (peer != .string) continue;
+                if (self.verbose) std.debug.print("[folk] existing peer: {s}\n", .{peer.string});
+                try self.sendOffer(conn, io, peer.string);
+            }
+        }
 
         // Handle peer joining — send offer
         if (std.mem.eql(u8, msg_type, "peer_joined")) {
@@ -162,15 +177,7 @@ pub const P2PManager = struct {
             if (peer != .string) return;
             if (self.verbose) std.debug.print("[folk] peer joined: {s}\n", .{peer.string});
 
-            if (self.peer_identity) |old| self.allocator.free(old);
-            self.peer_identity = try self.allocator.dupe(u8, peer.string);
-
-            var id_hex_buf: [128]u8 = undefined;
-            const id_hex = try self.identityHex(&id_hex_buf);
-            const offer = try std.fmt.allocPrint(self.allocator, "{{\"type\":\"offer\",\"from\":\"{s}\",\"to\":\"{s}\",\"data\":{{\"type\":\"mcp_relay\"}}}}", .{ id_hex, peer.string });
-            defer self.allocator.free(offer);
-            try writeClientMessage(self.allocator, io, conn, offer, .text);
-            if (self.verbose) std.debug.print("[folk] sent offer to {s}\n", .{peer.string});
+            try self.sendOffer(conn, io, peer.string);
         }
 
         // Handle incoming offer — send answer
@@ -179,15 +186,7 @@ pub const P2PManager = struct {
             if (from != .string) return;
             if (self.verbose) std.debug.print("[folk] got offer from {s}, accepting\n", .{from.string});
 
-            if (self.peer_identity) |old| self.allocator.free(old);
-            self.peer_identity = try self.allocator.dupe(u8, from.string);
-
-            var id_hex_buf: [128]u8 = undefined;
-            const id_hex = try self.identityHex(&id_hex_buf);
-            const answer = try std.fmt.allocPrint(self.allocator, "{{\"type\":\"answer\",\"from\":\"{s}\",\"to\":\"{s}\",\"data\":{{\"type\":\"mcp_relay\",\"accepted\":true}}}}", .{ id_hex, from.string });
-            defer self.allocator.free(answer);
-            try writeClientMessage(self.allocator, io, conn, answer, .text);
-            if (self.verbose) std.debug.print("[folk] sent answer to {s}\n", .{from.string});
+            try self.sendAnswer(conn, io, from.string);
         }
 
         // Handle relay message — process MCP call
@@ -229,6 +228,31 @@ pub const P2PManager = struct {
                 }
             }
         }
+    }
+
+    fn setPeer(self: *P2PManager, peer: []const u8) !void {
+        if (self.peer_identity) |old| self.allocator.free(old);
+        self.peer_identity = try self.allocator.dupe(u8, peer);
+    }
+
+    fn sendOffer(self: *P2PManager, conn: *std.http.Client.Connection, io: std.Io, peer: []const u8) !void {
+        try self.setPeer(peer);
+        var id_hex_buf: [128]u8 = undefined;
+        const id_hex = try self.identityHex(&id_hex_buf);
+        const offer = try std.fmt.allocPrint(self.allocator, "{{\"type\":\"offer\",\"from\":\"{s}\",\"to\":\"{s}\",\"data\":{{\"type\":\"mcp_relay\"}}}}", .{ id_hex, peer });
+        defer self.allocator.free(offer);
+        try writeClientMessage(self.allocator, io, conn, offer, .text);
+        if (self.verbose) std.debug.print("[folk] sent offer to {s}\n", .{peer});
+    }
+
+    fn sendAnswer(self: *P2PManager, conn: *std.http.Client.Connection, io: std.Io, peer: []const u8) !void {
+        try self.setPeer(peer);
+        var id_hex_buf: [128]u8 = undefined;
+        const id_hex = try self.identityHex(&id_hex_buf);
+        const answer = try std.fmt.allocPrint(self.allocator, "{{\"type\":\"answer\",\"from\":\"{s}\",\"to\":\"{s}\",\"data\":{{\"type\":\"mcp_relay\",\"accepted\":true}}}}", .{ id_hex, peer });
+        defer self.allocator.free(answer);
+        try writeClientMessage(self.allocator, io, conn, answer, .text);
+        if (self.verbose) std.debug.print("[folk] sent answer to {s}\n", .{peer});
     }
 };
 
@@ -378,15 +402,36 @@ pub fn encodeFrame(allocator: std.mem.Allocator, frame_type: FrameType, payload:
     const total_len = 5 + payload.len;
     const buf = try allocator.alloc(u8, total_len);
     errdefer allocator.free(buf);
-    std.mem.writeIntBig(u32, buf[0..4], @intCast(total_len));
+    std.mem.writeInt(u32, buf[0..4], @intCast(total_len), .big);
     buf[4] = @intFromEnum(frame_type);
     @memcpy(buf[5..], payload);
     return buf;
 }
 
-pub fn decodeFrame(data: []const u8) struct { frame_type: FrameType, payload: []u8 } {
-    const total_len = std.mem.readIntBig(u32, data[0..4]);
+pub fn decodeFrame(data: []const u8) !struct { frame_type: FrameType, payload: []const u8 } {
+    if (data.len < 5) return error.InvalidFrame;
+    const total_len = std.mem.readInt(u32, data[0..4], .big);
+    if (total_len < 5 or total_len > data.len or total_len > MAX_FRAME_SIZE) return error.InvalidFrame;
     const frame_type: FrameType = @enumFromInt(data[4]);
     const payload = data[5..total_len];
     return .{ .frame_type = frame_type, .payload = payload };
+}
+
+test "decodeFrame rejects truncated input" {
+    try std.testing.expectError(error.InvalidFrame, decodeFrame(&.{ 0, 0, 0 }));
+}
+
+test "decodeFrame rejects declared length past buffer" {
+    const data = [_]u8{ 0, 0, 0, 8, @intFromEnum(FrameType.ping), 1 };
+    try std.testing.expectError(error.InvalidFrame, decodeFrame(&data));
+}
+
+test "frame round trips payload" {
+    const allocator = std.testing.allocator;
+    const encoded = try encodeFrame(allocator, .mcp_message, "hello");
+    defer allocator.free(encoded);
+
+    const decoded = try decodeFrame(encoded);
+    try std.testing.expectEqual(FrameType.mcp_message, decoded.frame_type);
+    try std.testing.expectEqualStrings("hello", decoded.payload);
 }

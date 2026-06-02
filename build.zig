@@ -3,6 +3,7 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const build_app = b.option(bool, "app", "Build and install menu bar app") orelse false;
 
     const cli_module = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
@@ -29,14 +30,37 @@ pub fn build(b: *std.Build) void {
         .name = "FolkAround",
         .root_module = app_module,
     });
+    const app_install = b.addInstallArtifact(app, .{});
+    if (build_app) b.getInstallStep().dependOn(&app_install.step);
 
     // Helper: build both CLI and app
     const all_step = b.step("all", "Build daemon + menu bar app");
     all_step.dependOn(&exe.step);
-    all_step.dependOn(&app.step);
+    all_step.dependOn(&app_install.step);
 
     const app_step = b.step("app", "Build menu bar app");
-    app_step.dependOn(&app.step);
+    app_step.dependOn(&app_install.step);
+
+    const test_step = b.step("test", "Run Zig tests");
+    const test_sources = [_][]const u8{
+        "src/config.zig",
+        "src/http.zig",
+        "src/mcp.zig",
+        "src/p2p.zig",
+        "src/shell.zig",
+        "src/startup.zig",
+        "src/tools.zig",
+    };
+    for (test_sources) |source| {
+        const tests = b.addTest(.{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(source),
+                .target = target,
+                .optimize = optimize,
+            }),
+        });
+        test_step.dependOn(&b.addRunArtifact(tests).step);
+    }
 
     // Run step for the daemon
     const run_cmd = b.addRunArtifact(exe);

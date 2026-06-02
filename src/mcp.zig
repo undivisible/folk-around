@@ -222,13 +222,16 @@ pub fn run(allocator: std.mem.Allocator, verbose: bool, table: *tools.ToolTable)
         } orelse break;
         defer allocator.free(body);
 
-        const msg = std.json.parseFromSliceLeaky(Value, allocator, body, .{}) catch |err| {
+        var arena = std.heap.ArenaAllocator.init(allocator);
+        defer arena.deinit();
+        const message_allocator = arena.allocator();
+
+        const msg = std.json.parseFromSliceLeaky(Value, message_allocator, body, .{}) catch |err| {
             if (verbose) std.debug.print("[folk] json error: {s}\n", .{@errorName(err)});
             continue;
         };
 
-        const out = try handleMessage(allocator, verbose, table, msg) orelse continue;
-        defer allocator.free(out);
+        const out = try handleMessage(message_allocator, verbose, table, msg) orelse continue;
         try writeMessage(allocator, out);
     }
 }
