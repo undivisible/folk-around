@@ -60,9 +60,18 @@ pub fn main(init: std.process.Init.Minimal) !void {
         try pm.start();
         defer pm.stop();
         // Also start HTTP for local MCP client access
-        try http_transport.run(allocator, verbose, &tool_table, @intCast(http_port orelse 8080));
+        const port: u16 = @intCast(http_port orelse 8080);
+        if (!verbose) {
+            std.debug.print("[folk] signaling: {s} room={s}\n", .{ url, room orelse "default" });
+            std.debug.print("[folk] HTTP listening on http://127.0.0.1:{d}/\n", .{port});
+        }
+        try http_transport.run(allocator, verbose, &tool_table, port);
     } else if (http_port) |port| {
-        if (verbose) std.debug.print("[folk] HTTP SSE mode on port {d}\n", .{port});
+        if (verbose) {
+            std.debug.print("[folk] HTTP SSE mode on port {d}\n", .{port});
+        } else {
+            std.debug.print("[folk] HTTP listening on http://127.0.0.1:{d}/\n", .{port});
+        }
         try http_transport.run(allocator, verbose, &tool_table, port);
     } else {
         if (verbose) std.debug.print("[folk] stdio mode (mode={s})\n", .{@tagName(mode)});
