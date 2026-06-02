@@ -3,3 +3,5 @@ zig-out/
 *.o
 signal-server/.wrangler/
 signal-server/node_modules/
+signal-server/.astro/
+signal-server/dist/

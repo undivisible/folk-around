@@ -3,10 +3,11 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "wrangler dev",
-    "deploy": "wrangler deploy",
-    "tail": "wrangler tail",
-    "format": "prettier --check src/**/*.ts package.json tsconfig.json",
+    "dev": "WRANGLER_SEND_METRICS=false wrangler dev",
+    "build": "astro build",
+    "deploy": "bun run build && WRANGLER_SEND_METRICS=false wrangler deploy",
+    "tail": "WRANGLER_SEND_METRICS=false wrangler tail",
+    "format": "prettier --plugin=prettier-plugin-astro --check src/**/*.ts src/**/*.astro package.json tsconfig.json astro.config.mjs",
     "lint": "tsc --noEmit",
     "typecheck": "tsc --noEmit",
     "test": "bun test"
@@ -17,8 +18,10 @@
   "devDependencies": {
     "@cloudflare/workers-types": "^4.0.0",
     "@types/bun": "^1.3.14",
+    "astro": "^6.4.3",
     "prettier": "^3.5.3",
+    "prettier-plugin-astro": "^0.14.1",
     "typescript": "^5.0.0",
-    "wrangler": "^3.0.0"
+    "wrangler": "^4.97.0"
   }
 }

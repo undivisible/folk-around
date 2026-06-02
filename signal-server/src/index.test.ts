@@ -14,6 +14,17 @@ test("health endpoint returns service status", async () => {
   });
 });
 
+test("root endpoint returns service page without asset binding", async () => {
+  const response = await worker.fetch(
+    new Request("https://folk-around.test/"),
+    {} as Env,
+  );
+
+  expect(response.status).toBe(200);
+  expect(response.headers.get("content-type")).toContain("text/html");
+  await expect(response.text()).resolves.toContain("Folk Around Signalling");
+});
+
 class FakeSocket {
   sent: string[] = [];
 
@@ -68,4 +79,37 @@ test("signal room forwards relay only to target peer", () => {
     }),
   ]);
   expect(first.sent).toEqual([]);
+});
+
+test("signal room rejects spoofed sender identity", () => {
+  const room = new SignalRoom();
+  const first = new FakeSocket();
+  const second = new FakeSocket();
+  const firstIdentity =
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+  const secondIdentity =
+    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+  (room as any).handleMessage(first, {
+    type: "join",
+    identity: firstIdentity,
+  });
+  (room as any).handleMessage(second, {
+    type: "join",
+    identity: secondIdentity,
+  });
+  first.sent = [];
+  second.sent = [];
+
+  (room as any).handleMessage(first, {
+    type: "relay",
+    from: secondIdentity,
+    to: secondIdentity,
+    data: { jsonrpc: "2.0", id: 1, method: "ping" },
+  });
+
+  expect(first.sent).toEqual([
+    JSON.stringify({ type: "error", message: "Sender identity mismatch" }),
+  ]);
+  expect(second.sent).toEqual([]);
 });

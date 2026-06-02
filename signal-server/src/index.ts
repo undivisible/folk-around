@@ -25,6 +25,7 @@
 
 export interface Env {
   SIGNAL_ROOM: DurableObjectNamespace;
+  ASSETS?: Fetcher;
 }
 
 const identityPattern = /^[0-9a-f]{64}$/i;
@@ -41,6 +42,10 @@ function messageSize(value: unknown): number {
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
+
+    if (url.pathname === "/") {
+      return env.ASSETS?.fetch(request) ?? fallbackHomePage();
+    }
 
     // WebSocket signaling
     if (url.pathname.startsWith("/signal/")) {
@@ -66,14 +71,26 @@ export default {
       return Response.json({ rooms: [] }); // DOs don't support listing
     }
 
-    return new Response("Not found", { status: 404 });
+    return (
+      env.ASSETS?.fetch(request) ?? new Response("Not found", { status: 404 })
+    );
   },
 };
+
+function fallbackHomePage(): Response {
+  return new Response(
+    `<!doctype html><title>Folk Around Signalling</title><meta name="viewport" content="width=device-width, initial-scale=1"><body><main><h1>Folk Around Signalling</h1><p>A tiny Cloudflare relay for Folk Around peer discovery and offer, answer, and relay signalling.</p><p>Status: <a href="/health">health JSON</a></p></main></body>`,
+    {
+      headers: { "content-type": "text/html; charset=utf-8" },
+    },
+  );
+}
 
 /// Durable Object that manages one signaling room.
 /// All WebSocket connections to this room route through this DO.
 export class SignalRoom implements DurableObject {
   private peers = new Map<string, WebSocket>();
+  private sockets = new Map<WebSocket, string>();
 
   async fetch(request: Request): Promise<Response> {
     const pair = new WebSocketPair();
@@ -94,13 +111,12 @@ export class SignalRoom implements DurableObject {
 
     server.addEventListener("close", () => {
       // Find and remove this peer
-      for (const [identity, ws] of this.peers) {
-        if (ws === server) {
-          this.peers.delete(identity);
-          this.broadcast({ type: "peer_left", identity }, server);
-          break;
-        }
+      const identity = this.sockets.get(server);
+      if (identity && this.peers.get(identity) === server) {
+        this.peers.delete(identity);
+        this.broadcast({ type: "peer_left", identity }, server);
       }
+      this.sockets.delete(server);
     });
 
     return new Response(null, { status: 101, webSocket: client });
@@ -117,8 +133,15 @@ export class SignalRoom implements DurableObject {
           return;
         }
 
+        const existingPeer = this.peers.get(identity);
+        if (existingPeer && existingPeer !== server) {
+          existingPeer.close(1000, "Replaced by newer connection");
+          this.sockets.delete(existingPeer);
+        }
+
         // Store peer
         this.peers.set(identity, server);
+        this.sockets.set(server, identity);
 
         // Confirm join with current peer list
         const peerList = Array.from(this.peers.keys()).filter(
@@ -135,6 +158,7 @@ export class SignalRoom implements DurableObject {
 
       case "offer":
       case "answer": {
+        if (!this.isSender(server, msg.from)) return;
         if (!isIdentity(msg.from) || !isIdentity(msg.to)) {
           server.send(
             JSON.stringify({ type: "error", message: "Invalid peer identity" }),
@@ -161,6 +185,7 @@ export class SignalRoom implements DurableObject {
       }
 
       case "relay": {
+        if (!this.isSender(server, msg.from)) return;
         if (!isIdentity(msg.from) || !isIdentity(msg.to)) {
           server.send(
             JSON.stringify({ type: "error", message: "Invalid peer identity" }),
@@ -195,6 +220,21 @@ export class SignalRoom implements DurableObject {
           }),
         );
     }
+  }
+
+  private isSender(server: WebSocket, identity: unknown): boolean {
+    const joinedIdentity = this.sockets.get(server);
+    if (!joinedIdentity) {
+      server.send(JSON.stringify({ type: "error", message: "Join required" }));
+      return false;
+    }
+    if (identity !== joinedIdentity) {
+      server.send(
+        JSON.stringify({ type: "error", message: "Sender identity mismatch" }),
+      );
+      return false;
+    }
+    return true;
   }
 
   private broadcast(msg: any, exclude?: WebSocket) {
