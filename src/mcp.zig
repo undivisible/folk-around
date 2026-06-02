@@ -4,133 +4,201 @@ const tools = @import("tools.zig");
 const Allocator = std.mem.Allocator;
 const Value = std.json.Value;
 
-fn writeMessage(writer: anytype, msg: []const u8) !void {
-    try writer.print("Content-Length: {d}\r\n\r\n{s}", .{ msg.len, msg });
+fn writeStdout(bytes: []const u8) !void {
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var buffer: [4096]u8 = undefined;
+    var writer_state = std.Io.File.stdout().writer(io, &buffer);
+    try writer_state.interface.writeAll(bytes);
+    try writer_state.interface.flush();
 }
 
-fn sendObj(allocator: Allocator, writer: anytype, id: i64, result: Value) !void {
-    var buf = std.ArrayList(u8).init(allocator);
-    defer buf.deinit();
-    try buf.writer().print("{{\"jsonrpc\":\"2.0\",\"id\":{d},\"result\":", .{id});
-    try std.json.stringify(result, .{}, buf.writer());
-    try buf.writer().writeByte('}');
-    try writeMessage(writer, buf.items);
+fn readByte(fd: std.posix.fd_t) !?u8 {
+    var byte: [1]u8 = undefined;
+    const n = try std.posix.read(fd, &byte);
+    if (n == 0) return null;
+    return byte[0];
 }
 
-fn sendErr(allocator: Allocator, writer: anytype, id: i64, code: i32, msg: []const u8) !void {
-    var buf = std.ArrayList(u8).init(allocator);
-    defer buf.deinit();
-    try buf.writer().print("{{\"jsonrpc\":\"2.0\",\"id\":{d},\"error\":{{\"code\":{d},\"message\":\"{s}\"}}}}", .{id, code, msg});
-    try writeMessage(writer, buf.items);
+fn readLine(allocator: Allocator, fd: std.posix.fd_t) !?[]u8 {
+    var line: std.ArrayList(u8) = .empty;
+    errdefer line.deinit(allocator);
+
+    while (true) {
+        const byte = try readByte(fd) orelse {
+            if (line.items.len == 0) return null;
+            break;
+        };
+        try line.append(allocator, byte);
+        if (byte == '\n') break;
+        if (line.items.len > 8192) return error.HeaderTooLarge;
+    }
+
+    return try line.toOwnedSlice(allocator);
 }
 
-fn makeMap(allocator: Allocator) Value {
-    return Value{ .object = std.json.ObjectMap.init(allocator) };
+fn readExact(fd: std.posix.fd_t, dest: []u8) !void {
+    var offset: usize = 0;
+    while (offset < dest.len) {
+        const n = try std.posix.read(fd, dest[offset..]);
+        if (n == 0) return error.EndOfStream;
+        offset += n;
+    }
+}
+
+fn readMessage(allocator: Allocator) !?[]u8 {
+    const stdin = std.posix.STDIN_FILENO;
+    const first_line = try readLine(allocator, stdin) orelse return null;
+    defer allocator.free(first_line);
+
+    const trimmed = std.mem.trim(u8, first_line, " \t\r\n");
+    if (trimmed.len == 0) return readMessage(allocator);
+
+    if (!std.ascii.startsWithIgnoreCase(trimmed, "content-length:")) {
+        return try allocator.dupe(u8, trimmed);
+    }
+
+    const len_text = std.mem.trim(u8, trimmed["content-length:".len..], " \t");
+    const len = try std.fmt.parseUnsigned(usize, len_text, 10);
+
+    while (true) {
+        const line = try readLine(allocator, stdin) orelse return error.EndOfStream;
+        defer allocator.free(line);
+        if (std.mem.trim(u8, line, " \t\r\n").len == 0) break;
+    }
+
+    const body = try allocator.alloc(u8, len);
+    errdefer allocator.free(body);
+    try readExact(stdin, body);
+    return body;
+}
+
+fn writeMessage(allocator: Allocator, json: []const u8) !void {
+    const header = try std.fmt.allocPrint(allocator, "Content-Length: {d}\r\n\r\n", .{json.len});
+    defer allocator.free(header);
+    try writeStdout(header);
+    try writeStdout(json);
+}
+
+fn writeJsonValue(allocator: Allocator, value: Value) ![]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+    var writer: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+    try std.json.Stringify.value(value, .{}, &writer.writer);
+    buf = writer.toArrayList();
+    return try buf.toOwnedSlice(allocator);
+}
+
+fn response(allocator: Allocator, id: Value, result: Value) ![]u8 {
+    const id_json = try writeJsonValue(allocator, id);
+    defer allocator.free(id_json);
+    const result_json = try writeJsonValue(allocator, result);
+    defer allocator.free(result_json);
+    return try std.fmt.allocPrint(allocator, "{{\"jsonrpc\":\"2.0\",\"id\":{s},\"result\":{s}}}", .{ id_json, result_json });
+}
+
+fn errorResponse(allocator: Allocator, id: Value, code: i32, msg: []const u8) ![]u8 {
+    const id_json = try writeJsonValue(allocator, id);
+    defer allocator.free(id_json);
+    const msg_json = try writeJsonValue(allocator, Value{ .string = msg });
+    defer allocator.free(msg_json);
+    return try std.fmt.allocPrint(allocator, "{{\"jsonrpc\":\"2.0\",\"id\":{s},\"error\":{{\"code\":{d},\"message\":{s}}}}}", .{ id_json, code, msg_json });
+}
+
+fn makeMap(allocator: Allocator) !Value {
+    return Value{ .object = try std.json.ObjectMap.init(allocator, &.{}, &.{}) };
 }
 
 fn makeArr(allocator: Allocator) Value {
     return Value{ .array = std.json.Array.init(allocator) };
 }
 
-fn putObj(map: *Value, key: []const u8, val: Value) !void {
-    try map.object.put(key, val);
+fn putObj(allocator: Allocator, map: *Value, key: []const u8, val: Value) !void {
+    try map.object.put(allocator, key, val);
 }
 
-fn readMsg(allocator: Allocator) !?Value {
-    var buf: [4096]u8 = undefined;
-    const line = try std.io.getStdIn().reader().readUntilDelimiterOrEof(&buf, '\n') orelse return null;
-    if (!std.mem.startsWith(u8, line, "Content-Length: ")) return null;
-    const len = try std.fmt.parseInt(usize, std.mem.trim(u8, line[16..], " \r"), 10);
-    _ = try std.io.getStdIn().reader().readUntilDelimiterOrEof(&buf, '\n'); // blank line
+pub fn handleMessage(allocator: Allocator, verbose: bool, table: *tools.ToolTable, msg: Value) !?[]u8 {
+    if (msg != .object) return null;
+    const method = msg.object.get("method") orelse return null;
+    if (method != .string) return null;
+    const method_str = method.string;
 
-    const body = try allocator.alloc(u8, len);
-    defer allocator.free(body);
-    _ = try std.io.getStdIn().reader().readNoEof(body);
+    const id_val = msg.object.get("id");
+    const is_notif = id_val == null or id_val.? == .null;
 
-    return try std.json.parseFromSliceLeaky(Value, allocator, body, .{});
+    if (verbose) std.debug.print("[folk] <- {s}\n", .{method_str});
+
+    if (std.mem.eql(u8, method_str, "initialize")) {
+        if (is_notif) return null;
+        var caps = try makeMap(allocator);
+        var tcaps = try makeMap(allocator);
+        try putObj(allocator, &tcaps, "listChanged", Value{ .bool = false });
+        try putObj(allocator, &caps, "tools", tcaps);
+        var info = try makeMap(allocator);
+        try putObj(allocator, &info, "name", Value{ .string = "folk-around" });
+        try putObj(allocator, &info, "version", Value{ .string = "0.1.0" });
+        var res = try makeMap(allocator);
+        try putObj(allocator, &res, "protocolVersion", Value{ .string = "2024-11-05" });
+        try putObj(allocator, &res, "capabilities", caps);
+        try putObj(allocator, &res, "serverInfo", info);
+        return try response(allocator, id_val.?, res);
+    }
+
+    if (std.mem.eql(u8, method_str, "notifications/initialized")) return null;
+
+    if (std.mem.eql(u8, method_str, "ping")) {
+        if (is_notif) return null;
+        return try response(allocator, id_val.?, Value{ .object = try std.json.ObjectMap.init(allocator, &.{}, &.{}) });
+    }
+
+    if (std.mem.eql(u8, method_str, "tools/list")) {
+        if (is_notif) return null;
+        var arr = makeArr(allocator);
+        for (table.tools.items) |tool| {
+            var entry = try makeMap(allocator);
+            try putObj(allocator, &entry, "name", Value{ .string = tool.name });
+            try putObj(allocator, &entry, "description", Value{ .string = tool.description });
+            try putObj(allocator, &entry, "inputSchema", tool.input_schema);
+            try arr.array.append(entry);
+        }
+        var res = try makeMap(allocator);
+        try putObj(allocator, &res, "tools", arr);
+        return try response(allocator, id_val.?, res);
+    }
+
+    if (std.mem.eql(u8, method_str, "tools/call")) {
+        if (is_notif) return null;
+        const params = msg.object.get("params") orelse return try errorResponse(allocator, id_val.?, -32602, "Missing params");
+        if (params != .object) return try errorResponse(allocator, id_val.?, -32602, "Params not object");
+        const name_val = params.object.get("name") orelse return try errorResponse(allocator, id_val.?, -32602, "Missing name");
+        if (name_val != .string) return try errorResponse(allocator, id_val.?, -32602, "Name not string");
+        const args = params.object.get("arguments") orelse Value{ .object = try std.json.ObjectMap.init(allocator, &.{}, &.{}) };
+
+        const result = table.call(name_val.string, args) catch |err| {
+            return try errorResponse(allocator, id_val.?, -32603, @errorName(err));
+        };
+        return try response(allocator, id_val.?, result);
+    }
+
+    if (!is_notif) return try errorResponse(allocator, id_val.?, -32601, method_str);
+    return null;
 }
 
-pub fn run(allocator: Allocator, verbose: bool, table: *tools.ToolTable) !void {
-    const writer = std.io.getStdOut().writer();
-
+pub fn run(allocator: std.mem.Allocator, verbose: bool, table: *tools.ToolTable) !void {
     while (true) {
-        const msg = readMsg(allocator) catch |err| {
+        const body = readMessage(allocator) catch |err| {
             if (err == error.EndOfStream) break;
-            if (verbose) std.debug.print("[folk] err: {}\n", .{err});
+            if (verbose) std.debug.print("[folk] read error: {s}\n", .{@errorName(err)});
             continue;
         } orelse break;
+        defer allocator.free(body);
 
-        if (msg != .object) continue;
-        const method = msg.object.get("method") orelse continue;
-        const method_str = method.string;
+        const msg = std.json.parseFromSliceLeaky(Value, allocator, body, .{}) catch |err| {
+            if (verbose) std.debug.print("[folk] json error: {s}\n", .{@errorName(err)});
+            continue;
+        };
 
-        const id_val = msg.object.get("id");
-        const is_notif = (id_val == null or id_val.? == .null);
-
-        if (verbose) {
-            const id_str: []const u8 = if (id_val) |v| blk: {
-                if (v == .integer) break :blk (std.fmt.allocPrint(allocator, "{d}", .{v.integer}) catch "?")
-                else break :blk "null";
-            } else "null";
-            defer if (id_val != null) {
-                if (id_val.? == .integer) allocator.free(id_str);
-            };
-            std.debug.print("[folk] <- {s} id={s}\n", .{method_str, id_str});
-        }
-
-        if (std.mem.eql(u8, method_str, "initialize")) {
-            if (!is_notif) {
-                const id = id_val.?.integer;
-                var caps = makeMap(allocator);
-                var tcaps = makeMap(allocator);
-                try putObj(&tcaps, "listChanged", Value{ .bool = false });
-                try putObj(&caps, "tools", tcaps);
-                var info = makeMap(allocator);
-                try putObj(&info, "name", Value{ .string = "folk-around" });
-                try putObj(&info, "version", Value{ .string = "0.1.0" });
-                var res = makeMap(allocator);
-                try putObj(&res, "protocolVersion", Value{ .string = "2024-11-05" });
-                try putObj(&res, "capabilities", caps);
-                try putObj(&res, "serverInfo", info);
-                try sendObj(allocator, writer, id, res);
-            }
-        } else if (std.mem.eql(u8, method_str, "ping")) {
-            if (!is_notif) try sendObj(allocator, writer, id_val.?.integer, Value{ .null = {} });
-        } else if (std.mem.eql(u8, method_str, "tools/list")) {
-            if (!is_notif) {
-                const id = id_val.?.integer;
-                var arr = makeArr(allocator);
-                for (table.tools.items) |tool| {
-                    var entry = makeMap(allocator);
-                    try putObj(&entry, "name", Value{ .string = tool.name });
-                    try putObj(&entry, "description", Value{ .string = tool.description });
-                    try putObj(&entry, "inputSchema", tool.input_schema);
-                    try arr.array.append(entry);
-                }
-                var res = makeMap(allocator);
-                try putObj(&res, "tools", arr);
-                try sendObj(allocator, writer, id, res);
-            }
-        } else if (std.mem.eql(u8, method_str, "tools/call")) {
-            if (is_notif) continue;
-            const id = id_val.?.integer;
-            const params = msg.object.get("params") orelse {
-                try sendErr(allocator, writer, id, -32602, "Missing params");
-                continue;
-            };
-            if (params != .object) { try sendErr(allocator, writer, id, -32602, "Params not object"); continue; }
-            const name_val = params.object.get("name") orelse {
-                try sendErr(allocator, writer, id, -32602, "Missing name"); continue;
-            };
-            const args = params.object.get("arguments") orelse Value{ .null = {} };
-
-            const result = table.call(name_val.string, args) catch |err| {
-                try sendErr(allocator, writer, id, -32603, @errorName(err));
-                continue;
-            };
-            try sendObj(allocator, writer, id, result);
-        } else if (!is_notif) {
-            try sendErr(allocator, writer, id_val.?.integer, -32601, method_str);
-        }
+        const out = try handleMessage(allocator, verbose, table, msg) orelse continue;
+        defer allocator.free(out);
+        try writeMessage(allocator, out);
     }
 }

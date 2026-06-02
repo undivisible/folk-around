@@ -35,23 +35,23 @@ Standard MCP over stdin/stdout. Pipe to any MCP client.
 ### HTTP SSE
 `folk-around --http 8080` — runs an HTTP server with SSE. Clients connect at `http://localhost:8080/sse`. Tunnel via `ssh -L` or Tailscale for remote access.
 
-### P2P (experimental)
-`folk-around --p2p` — connects to a Cloudflare Workers signaling server, discovers peers in the same room, establishes an encrypted tunnel (Noise_XK + XChaCha20-Poly1305). No infrastructure needed except the signaling server, which you can deploy yourself:
+### P2P
+`folk-around --p2p` currently exits with an unavailable transport message. The Cloudflare Workers signaling server can still be deployed for future tunnel work:
 
 ```bash
 cd signal-server
-npm install
-npx wrangler deploy
+bun install
+bunx wrangler deploy
 ```
 
-Then point folk-around at it:
+Point folk-around at HTTP mode for remote use today:
 ```bash
-folk-around --signal-server https://your-worker.workers.dev --room my-room
+folk-around --http 8080
 ```
 
 ## macOS menu bar app (Zig, no Xcode)
 
-The menu bar companion is also written in Zig using AppKit directly via `@cImport`. No Swift, no Xcode required.
+The menu bar companion is also written in Zig using the Objective-C runtime directly. No Swift, no Xcode project required.
 
 ```bash
 # build it

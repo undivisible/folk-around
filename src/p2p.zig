@@ -7,7 +7,6 @@
 /// Wire protocol (after Noise handshake establishes encrypted tunnel):
 /// [4 bytes: frame length BE] [1 byte: type] [encrypted payload]
 ///   type 0x01 = MCP message, 0x02 = ping, 0x03 = pong, 0x04 = close
-
 const std = @import("std");
 const builtin = @import("builtin");
 
@@ -29,55 +28,35 @@ pub const P2PManager = struct {
 
     pub fn init(allocator: std.mem.Allocator, config: P2PConfig) !P2PManager {
         // Generate or load identity keypair
-        var pubkey: [32]u8 = undefined;
-        var seckey: [32]u8 = undefined;
+        const keypair = if (config.identity_secret_hex) |hex| blk: {
+            var seckey: [32]u8 = undefined;
 
-        if (config.identity_secret_hex) |hex| {
             // Decode existing key
             const decoded = try std.fmt.hexToBytes(&seckey, hex);
             if (decoded.len != 32) return error.InvalidKeyLength;
             // Derive public key from secret (X25519)
-            pubkey = derivePublicKey(seckey);
-        } else {
+            break :blk std.crypto.dh.X25519.KeyPair{
+                .public_key = try derivePublicKey(seckey),
+                .secret_key = seckey,
+            };
+        } else blk: {
             // Generate fresh keypair
-            var seed: [32]u8 = undefined;
-            try std.os.getrandom(&seed);
-            pubkey = derivePublicKey(seed);
-            seckey = seed;
-        }
+            const io = std.Io.Threaded.global_single_threaded.io();
+            break :blk std.crypto.dh.X25519.KeyPair.generate(io);
+        };
 
         return P2PManager{
             .allocator = allocator,
             .config = config,
-            .identity_public = pubkey,
-            .identity_secret = seckey,
+            .identity_public = keypair.public_key,
+            .identity_secret = keypair.secret_key,
             .running = false,
         };
     }
 
     pub fn start(self: *P2PManager) !void {
         _ = self;
-        // TODO: Full WebSocket client + Noise_XK handshake
-        //
-        // Steps:
-        // 1. Open TCP connection to signal_url (Cloudflare Worker)
-        // 2. Upgrade to WebSocket: GET /signal/{room}
-        // 3. Send: { type: "join", identity: "<pubkey-hex>" }
-        // 4. Receive peer list. If peers exist, initiate Noise handshake
-        // 5. Noise_XK pattern:
-        //    - Both sides know each other's static keys (exchanged via signal)
-        //    - One-round DH: X25519(sec, peer_pub) + X25519(ephemeral, peer_pub)
-        //    - Derive encryption key via HKDF-SHA256
-        // 6. Encrypt all frames with XChaCha20-Poly1305
-        //
-        // For now: WebSocket connection + handshake is stubbed.
-        // Requires Zig std.crypto (Curve25519, XChaCha20-Poly1305, HKDF)
-        // and a WebSocket client implementation.
-        //
-        // Until then, use --http <port> for remote connections
-        // over Tailscale/SSH tunnel (fully working).
-
-        self.running = true;
+        return error.UnsupportedP2PTransport;
     }
 
     pub fn stop(self: *P2PManager) void {
@@ -85,19 +64,15 @@ pub const P2PManager = struct {
     }
 
     pub fn identityHex(self: *P2PManager, buf: []u8) ![]u8 {
-        return std.fmt.bufPrint(buf, "{s}", .{std.fmt.fmtSliceHexLower(&self.identity_public)});
+        return std.fmt.bufPrint(buf, "{x}", .{&self.identity_public});
     }
 };
 
-fn derivePublicKey(secret: [32]u8) [32]u8 {
-    _ = secret;
+fn derivePublicKey(secret: [32]u8) ![32]u8 {
     // X25519 scalar multiplication
     // std.crypto.dh.X25519.scalarMultiply(pub, secret)
     // Requires Zig's std.crypto which needs specific Zig version support
-    // For now, return placeholder
-    var result: [32]u8 = undefined;
-    @memset(&result, 0);
-    return result;
+    return std.crypto.dh.X25519.recoverPublicKey(secret);
 }
 
 /// Wire protocol frame:

@@ -59,7 +59,7 @@ folk_tell, folk_screenshot
 ## signaling server (Cloudflare)
 
 signal-server/ is a standalone TypeScript project. deploy:
-  cd signal-server && npm install && npx wrangler deploy
+  cd signal-server && bun install && bunx wrangler deploy
 
 The worker creates Durable Objects per room. WebSocket-based signaling:
 - join/leave broadcast
@@ -72,6 +72,6 @@ The worker creates Durable Objects per room. WebSocket-based signaling:
 - no package manager. all deps inline.
 - macos target primary (osascript, screencapture, pbcopy/pbpaste, appkit).
 - mac_app.zig uses @cImport with Cocoa/ApplicationServices frameworks.
-- p2p.zig stub: WebSocket client + Noise handshake not yet wired (needs Zig std.crypto).
-- signal-server fully functional: deploy and use --p2p or --signal-server.
+- p2p transport is unavailable in the daemon until a WebSocket client and Noise handshake are wired.
+- signal-server fully functional: deploy for future tunnel work; use --http today.
 - linux fallback possible via xdotool/etc (no menu bar app).

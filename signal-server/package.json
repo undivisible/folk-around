@@ -5,13 +5,19 @@
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
-    "tail": "wrangler tail"
+    "tail": "wrangler tail",
+    "format": "prettier --check src/**/*.ts package.json tsconfig.json",
+    "lint": "tsc --noEmit",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test"
   },
   "dependencies": {
     "itty-router": "^5.0.0"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.0.0",
+    "@types/bun": "^1.3.14",
+    "prettier": "^3.5.3",
     "typescript": "^5.0.0",
     "wrangler": "^3.0.0"
   }

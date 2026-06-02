@@ -7,13 +7,9 @@ const p2p = @import("p2p.zig");
 const shell = @import("shell.zig");
 const tools = @import("tools.zig");
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
-
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
+pub fn main(init: std.process.Init.Minimal) !void {
+    const allocator = std.heap.smp_allocator;
+    const args = init.args.vector;
 
     var verbose = false;
     var mode_name: ?[]const u8 = null;
@@ -23,13 +19,25 @@ pub fn main() !void {
 
     var i: usize = 1;
     while (i < args.len) : (i += 1) {
-        if (std.mem.eql(u8, args[i], "--verbose") or std.mem.eql(u8, args[i], "-v")) verbose = true
-        else if (std.mem.eql(u8, args[i], "--mode")) { i += 1; if (i < args.len) mode_name = args[i]; }
-        else if (std.mem.eql(u8, args[i], "--http")) { i += 1; if (i < args.len) http_port = std.fmt.parseUnsigned(u16, args[i], 10) catch null; }
-        else if (std.mem.eql(u8, args[i], "--signal-server")) { i += 1; if (i < args.len) signal_url = args[i]; }
-        else if (std.mem.eql(u8, args[i], "--room")) { i += 1; if (i < args.len) room = args[i]; }
-        else if (std.mem.eql(u8, args[i], "--p2p")) signal_url = signal_url orelse "https://folk-around-signal.undivisible.workers.dev";
-        else if (std.mem.eql(u8, args[i], "--help") or std.mem.eql(u8, args[i], "-h")) {
+        const arg = std.mem.span(args[i]);
+
+        if (std.mem.eql(u8, arg, "--verbose") or std.mem.eql(u8, arg, "-v")) {
+            verbose = true;
+        } else if (std.mem.eql(u8, arg, "--mode")) {
+            i += 1;
+            if (i < args.len) mode_name = std.mem.span(args[i]);
+        } else if (std.mem.eql(u8, arg, "--http")) {
+            i += 1;
+            if (i < args.len) http_port = std.fmt.parseUnsigned(u16, std.mem.span(args[i]), 10) catch null;
+        } else if (std.mem.eql(u8, arg, "--signal-server")) {
+            i += 1;
+            if (i < args.len) signal_url = std.mem.span(args[i]);
+        } else if (std.mem.eql(u8, arg, "--room")) {
+            i += 1;
+            if (i < args.len) room = std.mem.span(args[i]);
+        } else if (std.mem.eql(u8, arg, "--p2p")) {
+            signal_url = signal_url orelse "https://folk-around-signal.undivisible.workers.dev";
+        } else if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
             return printHelp();
         }
     }
@@ -49,9 +57,14 @@ pub fn main() !void {
             .signal_url = url,
             .room = room orelse "default",
         });
-        try pm.start();
+        pm.start() catch |err| {
+            if (err == error.UnsupportedP2PTransport) {
+                std.debug.print("p2p transport is unavailable in this build; use --http <port> with SSH or Tailscale\n", .{});
+                std.process.exit(1);
+            }
+            return err;
+        };
         defer pm.stop();
-        if (verbose) std.debug.print("[folk] P2P listening, identity: {s}\n", .{pm.identityHex(&(try allocator.alloc(u8, 64))) catch "?"});
         // Also start HTTP for local MCP client access
         try http_transport.run(allocator, verbose, &tool_table, @intCast(http_port orelse 8080));
     } else if (http_port) |port| {
@@ -64,8 +77,7 @@ pub fn main() !void {
 }
 
 fn printHelp() !void {
-    const stdout = std.io.getStdOut().writer();
-    try stdout.print(
+    std.debug.print(
         \\folk-around - MCP computer use daemon
         \\Usage: folk-around [options]
         \\

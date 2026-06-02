@@ -4,7 +4,10 @@ const shell = @import("shell.zig");
 const Allocator = std.mem.Allocator;
 const Value = std.json.Value;
 
-pub const AccessMode = enum { full, limited, sandbox,
+pub const AccessMode = enum {
+    full,
+    limited,
+    sandbox,
     pub fn fromName(n: []const u8) ?AccessMode {
         if (std.mem.eql(u8, n, "full")) return .full;
         if (std.mem.eql(u8, n, "limited")) return .limited;
@@ -14,11 +17,11 @@ pub const AccessMode = enum { full, limited, sandbox,
 };
 
 const safe_cmds = std.StaticStringMap(void).initComptime(.{
-    .{ "ls", {} }, .{ "cat", {} }, .{ "grep", {} }, .{ "find", {} },
-    .{ "head", {} }, .{ "tail", {} }, .{ "wc", {} }, .{ "curl", {} },
-    .{ "echo", {} }, .{ "date", {} }, .{ "whoami", {} }, .{ "hostname", {} },
-    .{ "uname", {} }, .{ "which", {} }, .{ "pwd", {} }, .{ "ps", {} },
-    .{ "uptime", {} }, .{ "df", {} }, .{ "du", {} },
+    .{ "ls", {} },     .{ "cat", {} },   .{ "grep", {} },   .{ "find", {} },
+    .{ "head", {} },   .{ "tail", {} },  .{ "wc", {} },     .{ "curl", {} },
+    .{ "echo", {} },   .{ "date", {} },  .{ "whoami", {} }, .{ "hostname", {} },
+    .{ "uname", {} },  .{ "which", {} }, .{ "pwd", {} },    .{ "ps", {} },
+    .{ "uptime", {} }, .{ "df", {} },    .{ "du", {} },
 });
 
 fn strArg(args: Value, key: []const u8) ?[]const u8 {
@@ -36,18 +39,18 @@ fn boolArg(args: Value, key: []const u8) bool {
 
 fn textResult(allocator: Allocator, text: []const u8) !Value {
     var arr = std.json.Array.init(allocator);
-    var obj = std.json.ObjectMap.init(allocator);
-    try obj.put("type", Value{ .string = "text" });
-    try obj.put("text", Value{ .string = text });
+    var obj = std.json.ObjectMap.init(allocator, &.{}, &.{}) catch unreachable;
+    try obj.put(allocator, "type", Value{ .string = "text" });
+    try obj.put(allocator, "text", Value{ .string = text });
     try arr.append(Value{ .object = obj });
-    var res = std.json.ObjectMap.init(allocator);
-    try res.put("content", Value{ .array = arr });
+    var res = std.json.ObjectMap.init(allocator, &.{}, &.{}) catch unreachable;
+    try res.put(allocator, "content", Value{ .array = arr });
     return Value{ .object = res };
 }
 
 fn errResult(allocator: Allocator, text: []const u8) !Value {
     var r = try textResult(allocator, text);
-    try r.object.put("isError", Value{ .bool = true });
+    try r.object.put(allocator, "isError", Value{ .bool = true });
     return r;
 }
 
@@ -67,20 +70,20 @@ fn hShell(allocator: Allocator, args: Value, mode: AccessMode) !Value {
     const r = shell.exec(allocator, cmd, cwd) catch |e|
         return errResult(allocator, @errorName(e));
 
-    const text = try std.fmt.allocPrint(allocator, "stdout:\n{s}\n\nstderr:\n{s}\n\nexit: {d}", .{r.stdout, r.stderr, r.exit_code});
+    const text = try std.fmt.allocPrint(allocator, "stdout:\n{s}\n\nstderr:\n{s}\n\nexit: {d}", .{ r.stdout, r.stderr, r.exit_code });
     return textResult(allocator, text);
 }
 
 fn hSysInfo(allocator: Allocator, _: Value, _: AccessMode) !Value {
-    const text = try std.fmt.allocPrint(allocator, "os: {s}\narch: {s}", .{
-        @tagName(@import("builtin").os.tag), @tagName(@import("builtin").cpu.arch)
-    });
+    const text = try std.fmt.allocPrint(allocator, "os: {s}\narch: {s}", .{ @tagName(@import("builtin").os.tag), @tagName(@import("builtin").cpu.arch) });
     return textResult(allocator, text);
 }
 
 fn hListApps(allocator: Allocator, _: Value, mode: AccessMode) !Value {
     const limit = if (mode == .full) "50" else "30";
-    const r = shell.exec(allocator, try std.fmt.allocPrint(allocator, "ps aux --no-headers | head -{s}", .{limit}), null) catch |e|
+    const cmd = try std.fmt.allocPrint(allocator, "ps ax -o pid=,comm= | head -n {s}", .{limit});
+    defer allocator.free(cmd);
+    const r = shell.exec(allocator, cmd, null) catch |e|
         return errResult(allocator, @errorName(e));
     return textResult(allocator, r.stdout);
 }
@@ -100,11 +103,11 @@ fn hClipRead(allocator: Allocator, _: Value, _: AccessMode) !Value {
 
 fn hClipWrite(allocator: Allocator, args: Value, _: AccessMode) !Value {
     const text = strArg(args, "text") orelse return errResult(allocator, "missing text");
-    var child = std.process.Child.init(&[_][]const u8{ "pbcopy" }, allocator);
-    child.stdin_behavior = .Pipe;
-    try child.spawn();
-    if (child.stdin) |s| { try s.writer().writeAll(text); s.close(); }
-    _ = try child.wait();
+    const quoted = try std.fmt.allocPrint(allocator, "'{s}'", .{text});
+    defer allocator.free(quoted);
+    const cmd = try std.fmt.allocPrint(allocator, "printf {s} | /usr/bin/pbcopy", .{quoted});
+    defer allocator.free(cmd);
+    _ = try shell.exec(allocator, cmd, null);
     return textResult(allocator, "copied to clipboard");
 }
 
@@ -118,7 +121,7 @@ fn hOSA(allocator: Allocator, args: Value, _: AccessMode) !Value {
 fn hTell(allocator: Allocator, args: Value, _: AccessMode) !Value {
     const app = strArg(args, "app") orelse return errResult(allocator, "missing app");
     const cmd_body = strArg(args, "command") orelse return errResult(allocator, "missing command");
-    const script = try std.fmt.allocPrint(allocator, "tell application \"{s}\" to {s}", .{app, cmd_body});
+    const script = try std.fmt.allocPrint(allocator, "tell application \"{s}\" to {s}", .{ app, cmd_body });
     const cmd = try std.fmt.allocPrint(allocator, "osascript -e {s}", .{script});
     const r = shell.exec(allocator, cmd, null) catch |e| return errResult(allocator, @errorName(e));
     return textResult(allocator, r.stdout);
@@ -147,12 +150,14 @@ pub const ToolTable = struct {
     mode: AccessMode,
 
     pub fn init(allocator: Allocator, mode: AccessMode) ToolTable {
-        var tt = ToolTable{ .allocator = allocator, .tools = std.ArrayList(ToolEntry).init(allocator), .mode = mode };
+        var tt = ToolTable{ .allocator = allocator, .tools = .empty, .mode = mode };
         registerAll(&tt);
         return tt;
     }
 
-    pub fn deinit(self: *ToolTable) void { self.tools.deinit(); }
+    pub fn deinit(self: *ToolTable) void {
+        self.tools.deinit(self.allocator);
+    }
 
     pub fn call(self: *ToolTable, name: []const u8, args: Value) !Value {
         for (self.tools.items) |t| {
@@ -163,8 +168,9 @@ pub const ToolTable = struct {
 };
 
 fn reg(tt: *ToolTable, name: []const u8, desc: []const u8, handler: anytype) !void {
-    try tt.tools.append(ToolEntry{
-        .name = name, .description = desc,
+    try tt.tools.append(tt.allocator, ToolEntry{
+        .name = name,
+        .description = desc,
         .input_schema = Value{ .null = {} },
         .handler = handler,
     });
