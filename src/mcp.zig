@@ -88,6 +88,33 @@ fn writeJsonValue(allocator: Allocator, value: Value) ![]u8 {
     return try buf.toOwnedSlice(allocator);
 }
 
+fn formatToolLog(allocator: Allocator, phase: []const u8, name: []const u8, value: Value) ![]u8 {
+    const value_json = try writeJsonValue(allocator, value);
+    defer allocator.free(value_json);
+    return try std.fmt.allocPrint(allocator, "[folk] tool {s}: {s} {s}", .{ phase, name, value_json });
+}
+
+fn printToolLog(allocator: Allocator, phase: []const u8, name: []const u8, value: Value) void {
+    const line = formatToolLog(allocator, phase, name, value) catch |err| {
+        std.debug.print("[folk] tool {s}: {s} log error: {s}\n", .{ phase, name, @errorName(err) });
+        return;
+    };
+    defer allocator.free(line);
+    std.debug.print("{s}\n", .{line});
+}
+
+test "formatToolLog includes the tool name and json value" {
+    const allocator = std.testing.allocator;
+    var args = try makeMap(allocator);
+    defer args.object.deinit(allocator);
+    try putObj(allocator, &args, "command", Value{ .string = "echo hi" });
+
+    const line = try formatToolLog(allocator, "call", "folk_shell", args);
+    defer allocator.free(line);
+
+    try std.testing.expectEqualStrings("[folk] tool call: folk_shell {\"command\":\"echo hi\"}", line);
+}
+
 fn response(allocator: Allocator, id: Value, result: Value) ![]u8 {
     const id_json = try writeJsonValue(allocator, id);
     defer allocator.free(id_json);
@@ -173,9 +200,12 @@ pub fn handleMessage(allocator: Allocator, verbose: bool, table: *tools.ToolTabl
         if (name_val != .string) return try errorResponse(allocator, id_val.?, -32602, "Name not string");
         const args = params.object.get("arguments") orelse Value{ .object = try std.json.ObjectMap.init(allocator, &.{}, &.{}) };
 
+        if (verbose) printToolLog(allocator, "call", name_val.string, args);
         const result = table.call(name_val.string, args) catch |err| {
+            if (verbose) std.debug.print("[folk] tool error: {s} {s}\n", .{ name_val.string, @errorName(err) });
             return try errorResponse(allocator, id_val.?, -32603, @errorName(err));
         };
+        if (verbose) printToolLog(allocator, "result", name_val.string, result);
         return try response(allocator, id_val.?, result);
     }
 
