@@ -8,7 +8,7 @@ self-contained binary, no external dependencies. native macos menu bar app in zi
 ## build
 
 ```
-requires zig 0.14.0
+requires zig 0.16.0
 zig build                 # daemon only (zig-out/bin/folk-around)
 zig build -Dapp           # mac app only (zig-out/bin/FolkAround)
 zig build all             # both
@@ -25,7 +25,7 @@ src/
 ├── p2p.zig         Cloudflare Workers signaling client, WebSocket join, frame helpers
 ├── shell.zig       shell execution engine (fork/exec, pipe)
 ├── tools.zig       tool table (9 tools), access mode gating, safe cmd list
-└── mac_app.zig     macOS menu bar app (AppKit: NSStatusBar, NSMenu, NSImageView)
+└── mac_app.zig     macOS menu bar app (AppKit: NSStatusBar, NSMenu, cached Objective-C runtime calls)
 signal-server/
 ├── src/index.ts    Cloudflare Worker + Durable Object for WebSocket signaling
 ├── wrangler.toml
@@ -67,10 +67,10 @@ The worker creates Durable Objects per room. WebSocket-based signaling:
 
 ## development notes
 
-- zig 0.14 api only. 0.15+ has breaking std changes.
+- zig 0.16 api only. 0.15+ has breaking std changes from older releases.
 - no package manager. all deps inline.
 - macos target primary (osascript, screencapture, pbcopy/pbpaste, appkit).
-- mac_app.zig uses @cImport with Cocoa/ApplicationServices frameworks.
+- mac_app.zig uses cached Objective-C runtime calls with Cocoa/ApplicationServices frameworks.
 - p2p signaling is wired; full encrypted peer MCP relay still needs session/tunnel work.
 - signal-server fully functional: deploy for signaling; use --http for the local MCP endpoint.
 - linux fallback possible via xdotool/etc (no menu bar app).

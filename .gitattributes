@@ -1,0 +1,3 @@
+* linguist-vendored
+*.zig linguist-vendored=false linguist-language=Zig
+*.ts linguist-vendored=false linguist-language=TypeScript

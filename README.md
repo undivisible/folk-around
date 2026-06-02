@@ -71,7 +71,7 @@ Shows daemon status, start/stop daemon, run app at login, and run daemon at logi
 # one-liner
 curl -fsSL https://raw.githubusercontent.com/undivisible/folk-around/main/scripts/install.sh | bash
 
-# or build from source (zig 0.14.0)
+# or build from source (zig 0.16.0)
 git clone https://github.com/undivisible/folk-around
 cd folk-around
 zig build -Doptimize=ReleaseFast
@@ -98,7 +98,7 @@ src/
 ├── p2p.zig         P2P wire protocol + CF signaling client
 ├── shell.zig       shell execution engine
 ├── tools.zig       tool table (9 tools), access mode gating
-└── mac_app.zig     macOS menu bar app (AppKit via @cImport)
+└── mac_app.zig     macOS menu bar app (AppKit via cached Objective-C runtime calls)
 signal-server/
 ├── src/index.ts    Cloudflare Worker + Durable Object (WebSocket signaling)
 ├── wrangler.toml
