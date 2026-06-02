@@ -1,10 +1,12 @@
 # folk-around
 
-Zig MCP agent for computer control. Shell execution, accessibility automation, vision, clipboard, file ops, and osascript — over stdio or HTTP SSE.
+Zig MCP agent for computer control. Shell execution, accessibility automation, vision, clipboard, file ops, and osascript — over stdio, HTTP SSE, or P2P encrypted tunnel.
 
 ## what it is
 
-folk-around is a self-contained binary that speaks the [Model Context Protocol](https://modelcontextprotocol.io). Any MCP client (Claude, Cursor, any agent framework) can connect and get tools for controlling a computer:
+folk-around is a self-contained binary that speaks the [Model Context Protocol](https://modelcontextprotocol.io). Any MCP client (Claude Desktop, Cursor, any agent framework) can connect and get tools for controlling a computer.
+
+## tools
 
 | tool | does |
 |------|------|
@@ -33,33 +35,70 @@ folk-around
 ## usage
 
 ```bash
-# stdio mode (default) — pipe to any MCP client
-folk-around
-
-# HTTP SSE mode — for remote connections via Tailscale/SSH tunnel
-folk-around --http 8080
-
-# security modes
-folk-around --mode full      # unrestricted (default)
-folk-around --mode limited   # safe commands only
-folk-around --mode sandbox   # no shell, a11y+file ops only
-
-# verbose
-folk-around --verbose
+folk-around                              # stdio mode, full access
+folk-around --mode sandbox               # restricted mode
+folk-around --http 8080                  # HTTP SSE on port 8080
+folk-around --http 8080 --mode limited   # combined
+folk-around -v                           # verbose
 ```
 
-## connecting remotely
+## transports
 
-Run in HTTP mode on your machine, then tunnel:
+### stdio (default)
+Standard MCP protocol over stdin/stdout. Pipe to any MCP client.
 
 ```bash
-# on the target machine
+folk-around | your-mcp-client
+```
+
+### HTTP SSE
+Runs an HTTP server with Server-Sent Events. Clients connect via SSE for events and POST JSON-RPC messages.
+
+```bash
 folk-around --http 8080
+```
 
-# from your client machine (via Tailscale)
+Then point your MCP client at `http://localhost:8080/sse`.
+
+For remote access, tunnel through Tailscale or SSH:
+```bash
 ssh user@machine -L 8080:localhost:8080
+```
 
-# connect any MCP client to http://localhost:8080/sse
+### P2P (experimental)
+Direct encrypted tunnel between peers using Noise_XK handshake + XChaCha20-Poly1305. No infrastructure needed — just two folk-around instances with shared identity keys.
+
+```bash
+# Peer A (runs signaling)
+folk-around --p2p
+
+# Peer B connects to A
+folk-around --p2p --peer <A-identity-hex>
+```
+
+## menu bar companion (macOS)
+
+A SwiftUI app that lives in your menu bar. Start/stop the daemon, switch modes, see transport status.
+
+```bash
+# via Homebrew
+brew install --cask folk-around
+
+# or build from source
+cd FolkAround && swift build
+```
+
+## homebrew
+
+```bash
+# tap
+brew tap undivisible/tap
+
+# install the CLI
+brew install folk-around
+
+# install the menu bar app
+brew install --cask folk-around
 ```
 
 ## building from source
@@ -73,13 +112,7 @@ zig build -Doptimize=ReleaseFast
 sudo cp zig-out/bin/folk-around /usr/local/bin/
 ```
 
-## homebrew
-
-```bash
-brew install undivisible/tap/folk-around
-```
-
-## security
+## security modes
 
 | mode | shell | file read | file write | other |
 |------|-------|-----------|------------|-------|
@@ -89,11 +122,35 @@ brew install undivisible/tap/folk-around
 
 Safe command list in limited mode: ls, cat, grep, find, head, tail, wc, curl, echo, date, whoami, hostname, uname, which, pwd, ps, uptime, df, du
 
-## transport
+## source layout
 
-- **stdio**: standard MCP protocol over stdin/stdout
-- **HTTP SSE**: GET /sse for events, POST /message for calls, GET /health for health check
-- **WebRTC P2P**: coming
+```
+src/
+├── main.zig       entry, cli args (--mode, --http, --p2p)
+├── mcp.zig        stdio MCP transport
+├── http.zig       HTTP SSE transport
+├── p2p.zig        P2P signaling + wire protocol (Noise XK)
+├── shell.zig      shell execution engine
+└── tools.zig      tool table, access mode gating, safe cmds
+scripts/
+├── install.sh     one-liner installer
+└── folk-around.1  man page
+Formula/
+└── folk-around.rb Homebrew formula
+FolkAround.swift    Menu bar companion (SwiftUI)
+Package.swift       Swift package manifest
+```
+
+## roadmap
+
+- [x] stdio MCP transport
+- [x] HTTP SSE transport (remote via Tailscale/SSH)
+- [x] P2P wire protocol spec + signaling
+- [x] macOS menu bar companion (SwiftUI)
+- [x] Homebrew formula
+- [ ] GitHub Actions CI + release binaries
+- [ ] Linux a11y (xdotool, ydotool)
+- [ ] Windows support
 
 ## license
 
