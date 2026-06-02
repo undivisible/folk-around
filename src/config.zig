@@ -13,8 +13,8 @@ pub const AppConfig = struct {
     }
 };
 
-pub fn load(allocator: std.mem.Allocator) !AppConfig {
-    const path = try configPath(allocator);
+pub fn load(allocator: std.mem.Allocator, environ: std.process.Environ) !AppConfig {
+    const path = try configPath(allocator, environ);
     defer allocator.free(path);
 
     const io = std.Io.Threaded.global_single_threaded.io();
@@ -53,13 +53,13 @@ pub fn load(allocator: std.mem.Allocator) !AppConfig {
     return result;
 }
 
-pub fn save(allocator: std.mem.Allocator, app_config: AppConfig) !void {
-    const dir = try configDir(allocator);
+pub fn save(allocator: std.mem.Allocator, environ: std.process.Environ, app_config: AppConfig) !void {
+    const dir = try configDir(allocator, environ);
     defer allocator.free(dir);
     const io = std.Io.Threaded.global_single_threaded.io();
     try std.Io.Dir.cwd().createDirPath(io, dir);
 
-    const path = try configPath(allocator);
+    const path = try configPath(allocator, environ);
     defer allocator.free(path);
 
     var file = try std.Io.Dir.cwd().createFile(io, path, .{ .truncate = true });
@@ -99,13 +99,17 @@ pub fn generatePairingCode(allocator: std.mem.Allocator) ![]u8 {
     return std.fmt.allocPrint(allocator, "{s}-{d:0>4}", .{ words[number % words.len], number % 10000 });
 }
 
-fn configDir(allocator: std.mem.Allocator) ![]u8 {
-    const home = std.mem.span(std.c.getenv("HOME") orelse return error.HomeMissing);
+fn configDir(allocator: std.mem.Allocator, environ: std.process.Environ) ![]u8 {
+    const home = environ.getAlloc(allocator, "HOME") catch |err| switch (err) {
+        error.EnvironmentVariableMissing => return error.HomeMissing,
+        else => return err,
+    };
+    defer allocator.free(home);
     return std.fs.path.join(allocator, &.{ home, ".config", "folk-around" });
 }
 
-fn configPath(allocator: std.mem.Allocator) ![]u8 {
-    const dir = try configDir(allocator);
+fn configPath(allocator: std.mem.Allocator, environ: std.process.Environ) ![]u8 {
+    const dir = try configDir(allocator, environ);
     defer allocator.free(dir);
     return std.fs.path.join(allocator, &.{ dir, "config" });
 }

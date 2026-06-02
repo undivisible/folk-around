@@ -21,13 +21,25 @@ jobs:
 
       - name: Build binaries
         run: |
-          zig build -Doptimize=ReleaseFast
+          mkdir -p dist
+          zig build -Dtarget=aarch64-macos -Doptimize=ReleaseFast
+          cp zig-out/bin/folk-around dist/folk-around-darwin-aarch64
+          zig build -Dtarget=x86_64-macos -Doptimize=ReleaseFast
+          cp zig-out/bin/folk-around dist/folk-around-darwin-x86_64
+          zig build -Dtarget=aarch64-linux -Doptimize=ReleaseFast
+          cp zig-out/bin/folk-around dist/folk-around-linux-aarch64
+          zig build -Dtarget=x86_64-linux -Doptimize=ReleaseFast
+          cp zig-out/bin/folk-around dist/folk-around-linux-x86_64
           zig build -Dapp -Doptimize=ReleaseFast
+          cp zig-out/bin/FolkAround dist/FolkAround-darwin
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            zig-out/bin/folk-around
-            zig-out/bin/FolkAround
+            dist/folk-around-darwin-aarch64
+            dist/folk-around-darwin-x86_64
+            dist/folk-around-linux-aarch64
+            dist/folk-around-linux-x86_64
+            dist/FolkAround-darwin
           tag_name: ${{ github.ref_name }}

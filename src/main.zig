@@ -61,7 +61,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
         }
     }
 
-    var saved_config = try app_config.load(allocator);
+    var saved_config = try app_config.load(allocator, init.environ);
     defer saved_config.deinit(allocator);
 
     if (p2p_requested and signal_url == null) {
@@ -86,7 +86,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
         defer if (owns_room) allocator.free(room_value);
 
         const port: u16 = @intCast(http_port orelse 8080);
-        try app_config.save(allocator, .{
+        try app_config.save(allocator, init.environ, .{
             .signal_url = url,
             .room = room_value,
             .http_port = port,
@@ -105,7 +105,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
         printPairingInstructions(url, room_value, port);
         try http_transport.run(allocator, verbose, &tool_table, port);
     } else if (http_port) |port| {
-        try app_config.save(allocator, .{
+        try app_config.save(allocator, init.environ, .{
             .signal_url = saved_config.signal_url,
             .room = saved_config.room,
             .http_port = port,
