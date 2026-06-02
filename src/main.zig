@@ -2,6 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 const mcp = @import("mcp.zig");
+const app_config = @import("config.zig");
 const http_transport = @import("http.zig");
 const p2p = @import("p2p.zig");
 const shell = @import("shell.zig");
@@ -16,6 +17,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
     var http_port: ?u16 = null;
     var signal_url: ?[]const u8 = null;
     var room: ?[]const u8 = null;
+    var p2p_requested = false;
 
     var i: usize = 1;
     while (i < args.len) : (i += 1) {
@@ -36,11 +38,20 @@ pub fn main(init: std.process.Init.Minimal) !void {
             i += 1;
             if (i < args.len) room = std.mem.span(args[i]);
         } else if (std.mem.eql(u8, arg, "--p2p")) {
-            signal_url = signal_url orelse "https://folk-around-signal.undivisible.workers.dev";
+            p2p_requested = true;
         } else if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
             return printHelp();
         }
     }
+
+    var saved_config = try app_config.load(allocator);
+    defer saved_config.deinit(allocator);
+
+    if (p2p_requested and signal_url == null) {
+        signal_url = saved_config.signal_url orelse "https://folk-around-signal.undivisible.workers.dev";
+    }
+    if (http_port == null) http_port = saved_config.http_port;
+    if (mode_name == null) mode_name = saved_config.mode;
 
     const mode = tools.AccessMode.fromName(mode_name orelse "full") orelse {
         std.debug.print("invalid mode. use: full, limited, sandbox\n", .{});
@@ -51,22 +62,35 @@ pub fn main(init: std.process.Init.Minimal) !void {
     defer tool_table.deinit();
 
     if (signal_url) |url| {
+        const room_value = room orelse saved_config.room orelse try app_config.generatePairingCode(allocator);
+        const owns_room = room == null and saved_config.room == null;
+        defer if (owns_room) allocator.free(room_value);
+
+        const port: u16 = @intCast(http_port orelse 8080);
+        try app_config.save(allocator, .{
+            .signal_url = url,
+            .room = room_value,
+            .http_port = port,
+            .mode = mode_name orelse "full",
+        });
+
         if (verbose) std.debug.print("[folk] P2P mode, signaling: {s}\n", .{url});
         var pm = try p2p.P2PManager.init(allocator, .{
             .enabled = true,
             .signal_url = url,
-            .room = room orelse "default",
+            .room = room_value,
         }, verbose);
         try pm.start();
         defer pm.stop();
-        // Also start HTTP for local MCP client access
-        const port: u16 = @intCast(http_port orelse 8080);
-        if (!verbose) {
-            std.debug.print("[folk] signaling: {s} room={s}\n", .{ url, room orelse "default" });
-            std.debug.print("[folk] HTTP listening on http://127.0.0.1:{d}/\n", .{port});
-        }
+        printPairingInstructions(url, room_value, port);
         try http_transport.run(allocator, verbose, &tool_table, port);
     } else if (http_port) |port| {
+        try app_config.save(allocator, .{
+            .signal_url = saved_config.signal_url,
+            .room = saved_config.room,
+            .http_port = port,
+            .mode = mode_name orelse "full",
+        });
         if (verbose) {
             std.debug.print("[folk] HTTP SSE mode on port {d}\n", .{port});
         } else {
@@ -79,6 +103,13 @@ pub fn main(init: std.process.Init.Minimal) !void {
     }
 }
 
+fn printPairingInstructions(signal_url: []const u8, room: []const u8, port: u16) void {
+    std.debug.print("[folk] pairing code: {s}\n", .{room});
+    std.debug.print("[folk] give this code to the client and use signaling server: {s}\n", .{signal_url});
+    std.debug.print("[folk] local MCP endpoint: http://127.0.0.1:{d}/sse\n", .{port});
+    std.debug.print("[folk] waiting for peer...\n", .{});
+}
+
 fn printHelp() !void {
     std.debug.print(
         \\folk-around - MCP computer use daemon
@@ -87,15 +118,15 @@ fn printHelp() !void {
         \\  --verbose           Show tool calls
         \\  --mode <mode>       full, limited, sandbox (default: full)
         \\  --http <port>       HTTP SSE transport (e.g. --http 8080)
-        \\  --p2p               Join CF signaling server and expose local HTTP
+        \\  --p2p               Join saved/default signaling server and expose local HTTP
         \\  --signal-server <url>  Custom signaling server URL
-        \\  --room <name>       P2P room name (default: "default")
+        \\  --room <name>       Pairing code / room name
         \\  --help              This help
         \\
         \\Transports:
         \\  stdio     default, pipe to any MCP client
         \\  --http    HTTP SSE for remote over Tailscale/SSH
-        \\  --p2p     Signaling server registration plus local HTTP MCP
+        \\  --p2p     Prints a pairing code, registers with signaling, and starts local MCP
         \\
     , .{});
 }

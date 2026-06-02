@@ -10,7 +10,7 @@ Self-contained binary that speaks the [Model Context Protocol](https://modelcont
 folk-around                              # stdio, full access
 folk-around --http 8080                  # HTTP SSE, remote via SSH/Tailscale
 folk-around --mode sandbox               # restricted mode
-folk-around --p2p                        # join signaling, serve local HTTP
+folk-around --p2p                        # print pairing code, join signaling, serve local HTTP
 ```
 
 ## tools
@@ -36,7 +36,7 @@ Standard MCP over stdin/stdout. Pipe to any MCP client.
 `folk-around --http 8080` — runs an HTTP server with SSE. Clients connect at `http://localhost:8080/sse`. Tunnel via `ssh -L` or Tailscale for remote access.
 
 ### P2P
-`folk-around --p2p` or `folk-around --signal-server <host>` joins a Cloudflare Workers signaling room over WebSocket, announces this daemon identity, and starts local HTTP MCP on port 8080 by default. Full encrypted peer-to-peer MCP relay is still future work.
+`folk-around --p2p` or `folk-around --signal-server <host>` prints a pairing code, joins that signaling room over WebSocket, announces this daemon identity, and starts local HTTP MCP on port 8080 by default. Give the pairing code and signaling server to the client. Full encrypted peer-to-peer MCP relay is still future work.
 
 ```bash
 cd signal-server
@@ -48,6 +48,8 @@ Point folk-around at a custom signaling host:
 ```bash
 folk-around --signal-server https://your-worker.workers.dev --room my-room
 ```
+
+The last signaling server, pairing code, HTTP port, and mode are saved under `~/.config/folk-around/config`. Running `folk-around --p2p` again reuses the last saved pairing code unless you pass `--room <code>`.
 
 ## macOS menu bar app (Zig, no Xcode)
 
@@ -61,7 +63,7 @@ zig build -Dapp   # outputs FolkAround in zig-out/bin/
 zig build all
 ```
 
-Shows green/red status dot, start/stop daemon, mode selector, port display, logs.
+Shows daemon status, start/stop daemon, run app at login, and run daemon at login.
 
 ## install
 

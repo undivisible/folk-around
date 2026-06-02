@@ -11,9 +11,9 @@ Options:
   --verbose      Show tool calls
   --mode <mode>  Security mode: full, limited, sandbox
   --http <port>  HTTP SSE transport mode (e.g. 8080)
-  --p2p          Join default signaling server and start local HTTP
+  --p2p          Print pairing code, join saved/default signaling server, and start local HTTP
   --signal-server <url>  Custom signaling server URL
-  --room <name>  Signaling room name
+  --room <name>  Pairing code / signaling room name
   --help         This help
 
 ## Modes
@@ -32,7 +32,7 @@ folk_tell, folk_screenshot
 
 stdio (default): MCP protocol over stdin/stdout. Pipe to any MCP client.
 HTTP SSE: Use --http <port>. GET /sse for events, POST /message for calls.
-Signaling: Use --p2p or --signal-server <url>. Joins /signal/<room> and starts local HTTP MCP.
+Signaling: Use --p2p or --signal-server <url>. Prints a pairing code, joins /signal/<room>, and starts local HTTP MCP. The last server, code, port, and mode are saved under ~/.config/folk-around/config.
 
 ## Examples
 
