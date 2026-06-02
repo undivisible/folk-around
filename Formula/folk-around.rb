@@ -3,7 +3,7 @@
 
 class FolkAround < Formula
   desc "Zig MCP agent for computer control"
-  homepage "https://github.com/undivisible/folk-around"
+  homepage "https://folkaround.undivisible.dev"
   license "MPL-2.0"
   version "0.2.0"
 

@@ -19,7 +19,7 @@ const WebSocketOpcode = enum(u4) {
 
 pub const P2PConfig = struct {
     enabled: bool = false,
-    signal_url: []const u8 = "https://folk-around-signal.undivisible.workers.dev",
+    signal_url: []const u8 = "https://folkaround.undivisible.dev",
     room: []const u8 = "default",
     identity_secret_hex: ?[]const u8 = null,
     local_port: u16 = 0,

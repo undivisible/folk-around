@@ -94,21 +94,21 @@ fn addRequired(schema: *Value, allocator: Allocator, fields: []const []const u8)
 fn schemaFor(allocator: Allocator, name: []const u8) !Value {
     var schema = try objectSchema(allocator);
     if (std.mem.eql(u8, name, "folk_shell")) {
-        try addProperty(&schema, allocator, "command", try stringProperty(allocator, "Command to execute"));
-        try addProperty(&schema, allocator, "cwd", try stringProperty(allocator, "Working directory"));
+        try addProperty(&schema, allocator, "command", try stringProperty(allocator, "Shell command to execute on the Folk Around host computer"));
+        try addProperty(&schema, allocator, "cwd", try stringProperty(allocator, "Working directory on the Folk Around host computer"));
         try addRequired(&schema, allocator, &.{"command"});
     } else if (std.mem.eql(u8, name, "folk_spawn")) {
-        try addProperty(&schema, allocator, "command", try stringProperty(allocator, "Command to spawn"));
+        try addProperty(&schema, allocator, "command", try stringProperty(allocator, "Background command to spawn on the Folk Around host computer"));
         try addRequired(&schema, allocator, &.{"command"});
     } else if (std.mem.eql(u8, name, "folk_clipboard_write")) {
-        try addProperty(&schema, allocator, "text", try stringProperty(allocator, "Text to copy"));
+        try addProperty(&schema, allocator, "text", try stringProperty(allocator, "Text to copy to the Folk Around host computer clipboard"));
         try addRequired(&schema, allocator, &.{"text"});
     } else if (std.mem.eql(u8, name, "folk_osascript")) {
-        try addProperty(&schema, allocator, "script", try stringProperty(allocator, "AppleScript source"));
+        try addProperty(&schema, allocator, "script", try stringProperty(allocator, "AppleScript source to run on the Folk Around host Mac"));
         try addRequired(&schema, allocator, &.{"script"});
     } else if (std.mem.eql(u8, name, "folk_tell")) {
-        try addProperty(&schema, allocator, "app", try stringProperty(allocator, "Application name"));
-        try addProperty(&schema, allocator, "command", try stringProperty(allocator, "AppleScript command body"));
+        try addProperty(&schema, allocator, "app", try stringProperty(allocator, "Application name on the Folk Around host Mac"));
+        try addProperty(&schema, allocator, "command", try stringProperty(allocator, "AppleScript command body to run on the Folk Around host Mac"));
         try addRequired(&schema, allocator, &.{ "app", "command" });
     }
     return schema;
@@ -257,15 +257,15 @@ fn reg(tt: *ToolTable, name: []const u8, desc: []const u8, handler: anytype) !vo
 }
 
 fn registerAll(tt: *ToolTable) void {
-    reg(tt, "folk_shell", "Execute a shell command", hShell) catch {};
-    reg(tt, "folk_system_info", "System info", hSysInfo) catch {};
-    reg(tt, "folk_list_apps", "List running processes", hListApps) catch {};
-    reg(tt, "folk_spawn", "Spawn background process (full mode)", hSpawn) catch {};
-    reg(tt, "folk_clipboard_read", "Read clipboard contents", hClipRead) catch {};
-    reg(tt, "folk_clipboard_write", "Write to clipboard", hClipWrite) catch {};
-    reg(tt, "folk_osascript", "Execute AppleScript (macOS)", hOSA) catch {};
-    reg(tt, "folk_tell", "Tell an app (macOS)", hTell) catch {};
-    reg(tt, "folk_screenshot", "Take screenshot (macOS)", hScreenshot) catch {};
+    reg(tt, "folk_shell", "Run a shell command on the Folk Around host computer, not on the agent provider or remote model server", hShell) catch {};
+    reg(tt, "folk_system_info", "Return OS and CPU details for the Folk Around host computer", hSysInfo) catch {};
+    reg(tt, "folk_list_apps", "List running processes on the Folk Around host computer", hListApps) catch {};
+    reg(tt, "folk_spawn", "Spawn a background process on the Folk Around host computer in full mode", hSpawn) catch {};
+    reg(tt, "folk_clipboard_read", "Read the Folk Around host computer clipboard", hClipRead) catch {};
+    reg(tt, "folk_clipboard_write", "Write text to the Folk Around host computer clipboard", hClipWrite) catch {};
+    reg(tt, "folk_osascript", "Run AppleScript on the Folk Around host Mac", hOSA) catch {};
+    reg(tt, "folk_tell", "Send an AppleScript command to an app on the Folk Around host Mac", hTell) catch {};
+    reg(tt, "folk_screenshot", "Capture a screenshot on the Folk Around host Mac and save it locally there", hScreenshot) catch {};
 }
 
 test "all registered tools advertise object input schemas" {
@@ -293,4 +293,14 @@ test "shell tool schema declares command as required" {
     try std.testing.expect(required == .array);
     try std.testing.expectEqual(@as(usize, 1), required.array.items.len);
     try std.testing.expectEqualStrings("command", required.array.items[0].string);
+}
+
+test "tool descriptions identify the host computer boundary" {
+    const allocator = std.testing.allocator;
+    var table = ToolTable.init(allocator, .full);
+    defer table.deinit();
+
+    for (table.tools.items) |tool| {
+        try std.testing.expect(std.mem.indexOf(u8, tool.description, "host") != null);
+    }
 }

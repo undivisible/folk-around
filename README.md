@@ -1,5 +1,7 @@
 # folk-around
 
+https://folkaround.undivisible.dev
+
 Zig MCP agent for computer control. Shell, accessibility, clipboard, files, osascript — over stdio, HTTP SSE, or Cloudflare signaling plus local HTTP. Native macOS menu bar app, also in Zig.
 
 ## what it is
@@ -38,6 +40,8 @@ Standard MCP over stdin/stdout. Pipe to any MCP client.
 ### P2P
 `folk-around --p2p` or `folk-around --signal-server <host>` prints a pairing code, joins that signaling room over WebSocket, announces this daemon identity, and starts local HTTP MCP on port 8080 by default. Give the pairing code and signaling server to the client. Full encrypted peer-to-peer MCP relay is still future work.
 
+Hosted signalling server and status page: `https://folkaround.undivisible.dev`
+
 ```bash
 cd signal-server
 bun install
@@ -48,6 +52,13 @@ Point folk-around at a custom signaling host:
 ```bash
 folk-around --signal-server https://your-worker.workers.dev --room my-room
 ```
+
+Use the hosted Folk Around signalling server:
+```bash
+folk-around --signal-server https://folkaround.undivisible.dev --room my-room
+```
+
+The tools exposed through MCP always act on the computer running `folk-around`. Their tool descriptions say this explicitly so a remote agent understands that shell commands, clipboard access, AppleScript, process listing, and screenshots happen on the Folk Around host computer, not on the agent provider's own runtime.
 
 The last signaling server, pairing code, HTTP port, and mode are saved under `~/.config/folk-around/config`. Running `folk-around --p2p` again reuses the last saved pairing code unless you pass `--room <code>`.
 

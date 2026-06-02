@@ -65,7 +65,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
     defer saved_config.deinit(allocator);
 
     if (p2p_requested and signal_url == null) {
-        signal_url = saved_config.signal_url orelse "https://folk-around-signal.undivisible.workers.dev";
+        signal_url = saved_config.signal_url orelse "https://folkaround.undivisible.dev";
     }
     if (http_port == null) http_port = saved_config.http_port;
     if (mode_name == null) mode_name = saved_config.mode;

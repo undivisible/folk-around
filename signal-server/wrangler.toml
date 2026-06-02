@@ -7,6 +7,10 @@ directory = "./dist"
 binding = "ASSETS"
 run_worker_first = true
 
+[[routes]]
+pattern = "folkaround.undivisible.dev"
+custom_domain = true
+
 # Durable Object for WebSocket room state
 [[durable_objects.bindings]]
 name = "SIGNAL_ROOM"
