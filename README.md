@@ -9,7 +9,8 @@ Zig MCP agent for computer control. Shell, accessibility, clipboard, files, osas
 Self-contained binary that speaks the [Model Context Protocol](https://modelcontextprotocol.io). Any MCP client (Claude Desktop, Cursor, any agent) connects and gets 9 tools for controlling a computer.
 
 ```bash
-folk-around                              # stdio, full access
+folk-around                              # reuse saved transport, or stdio if none is saved
+folk-around --stdio                      # force stdio, full access
 folk-around --http 8080                  # HTTP SSE, remote via SSH/Tailscale
 folk-around --mode sandbox               # restricted mode
 folk-around --p2p                        # print pairing code, join signaling, serve local HTTP
@@ -32,7 +33,10 @@ folk-around --p2p                        # print pairing code, join signaling, s
 ## transports
 
 ### stdio
-Standard MCP over stdin/stdout. Pipe to any MCP client.
+Standard MCP over stdin/stdout. Pipe to any MCP client. Use `folk-around --stdio` to force stdio when a previous HTTP or signalling transport is saved.
+
+### saved transport
+Running `folk-around` with no transport flags reuses the last saved transport settings under `~/.config/folk-around/config`. If no transport is saved, it falls back to stdio.
 
 ### HTTP SSE
 `folk-around --http 8080` — runs an HTTP server with SSE. Clients connect at `http://localhost:8080/sse`. Tunnel via `ssh -L` or Tailscale for remote access.
@@ -60,7 +64,7 @@ folk-around --signal-server https://folkaround.undivisible.dev --room my-room
 
 The tools exposed through MCP always act on the computer running `folk-around`. Their tool descriptions say this explicitly so a remote agent understands that shell commands, clipboard access, AppleScript, process listing, and screenshots happen on the Folk Around host computer, not on the agent provider's own runtime.
 
-The last signaling server, pairing code, HTTP port, and mode are saved under `~/.config/folk-around/config`. Running `folk-around --p2p` again reuses the last saved pairing code unless you pass `--room <code>`.
+The last signaling server, pairing code, HTTP port, and mode are saved under `~/.config/folk-around/config`. Running `folk-around` with no transport flags reuses saved transport settings. Running `folk-around --p2p` reuses the last saved pairing code unless you pass `--room <code>`.
 
 ## macOS menu bar app (Zig, no Xcode)
 

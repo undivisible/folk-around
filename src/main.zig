@@ -35,6 +35,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
     var signal_url: ?[]const u8 = null;
     var room: ?[]const u8 = null;
     var p2p_requested = false;
+    var stdio_requested = false;
 
     var i: usize = 1;
     while (i < args.len) : (i += 1) {
@@ -56,6 +57,8 @@ pub fn main(init: std.process.Init.Minimal) !void {
             if (i < args.len) room = std.mem.span(args[i]);
         } else if (std.mem.eql(u8, arg, "--p2p")) {
             p2p_requested = true;
+        } else if (std.mem.eql(u8, arg, "--stdio")) {
+            stdio_requested = true;
         } else if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
             return printHelp();
         }
@@ -64,10 +67,15 @@ pub fn main(init: std.process.Init.Minimal) !void {
     var saved_config = try app_config.load(allocator, init.environ);
     defer saved_config.deinit(allocator);
 
-    if (p2p_requested and signal_url == null) {
-        signal_url = saved_config.signal_url orelse "https://folkaround.undivisible.dev";
+    if (stdio_requested) {
+        signal_url = null;
+        http_port = null;
+    } else {
+        if (p2p_requested and signal_url == null) {
+            signal_url = saved_config.signal_url orelse "https://folkaround.undivisible.dev";
+        }
+        if (http_port == null) http_port = saved_config.http_port;
     }
-    if (http_port == null) http_port = saved_config.http_port;
     if (mode_name == null) mode_name = saved_config.mode;
 
     const mode = tools.AccessMode.fromName(mode_name orelse "full") orelse {
@@ -137,6 +145,7 @@ fn printHelp() !void {
         \\
         \\  --verbose           Show tool calls
         \\  --mode <mode>       full, limited, sandbox (default: full)
+        \\  --stdio             Force stdio transport and ignore saved transport
         \\  --http <port>       HTTP SSE transport (e.g. --http 8080)
         \\  --p2p               Join saved/default signaling server and expose local HTTP
         \\  --signal-server <url>  Custom signaling server URL
@@ -144,7 +153,8 @@ fn printHelp() !void {
         \\  --help              This help
         \\
         \\Transports:
-        \\  stdio     default, pipe to any MCP client
+        \\  no args   Reuses the last saved transport, or stdio if none is saved
+        \\  --stdio   Standard MCP over stdin/stdout
         \\  --http    HTTP SSE for remote over Tailscale/SSH
         \\  --p2p     Prints a pairing code, registers with signaling, and starts local MCP
         \\

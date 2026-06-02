@@ -79,7 +79,7 @@ export default {
 
 function fallbackHomePage(): Response {
   return new Response(
-    `<!doctype html><title>Folk Around Signalling</title><meta name="viewport" content="width=device-width, initial-scale=1"><body><main><h1>Folk Around Signalling</h1><p>A tiny Cloudflare relay for Folk Around peer discovery and offer, answer, and relay signalling.</p><p>Status: <a href="/health">health JSON</a></p></main></body>`,
+    `<!doctype html><title>Folk Around Signalling</title><meta name="viewport" content="width=device-width, initial-scale=1"><body><main><p>online</p><h1>Folk Around Signalling</h1><p>Hosted signalling for Folk Around peer discovery.</p><p><a href="/health">Health</a></p></main></body>`,
     {
       headers: { "content-type": "text/html; charset=utf-8" },
     },

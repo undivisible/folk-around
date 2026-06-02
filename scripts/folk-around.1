@@ -10,6 +10,7 @@ It speaks MCP over stdio, HTTP SSE, or Cloudflare signaling plus local HTTP. Wri
 Options:
   --verbose      Show tool calls
   --mode <mode>  Security mode: full, limited, sandbox
+  --stdio        Force stdio transport and ignore saved transport
   --http <port>  HTTP SSE transport mode (e.g. 8080)
   --p2p          Print pairing code, join saved/default signaling server, and start local HTTP
   --signal-server <url>  Custom signaling server URL
@@ -30,13 +31,15 @@ folk_tell, folk_screenshot
 
 ## Transports
 
-stdio (default): MCP protocol over stdin/stdout. Pipe to any MCP client.
+No transport flags: Reuse the last saved transport, or stdio if none is saved.
+stdio: Use --stdio for MCP protocol over stdin/stdout. Pipe to any MCP client.
 HTTP SSE: Use --http <port>. GET /sse for events, POST /message for calls.
 Signaling: Use --p2p or --signal-server <url>. Prints a pairing code, joins /signal/<room>, and starts local HTTP MCP. The last server, code, port, and mode are saved under ~/.config/folk-around/config.
 
 ## Examples
 
-  folk-around                                          # stdio mode, full access
+  folk-around                                          # reuse saved transport, or stdio if none is saved
+  folk-around --stdio                                  # force stdio mode, full access
   folk-around --mode sandbox                          # sandbox mode
   folk-around --http 8080                             # HTTP SSE on port 8080
   folk-around --signal-server folkaround.undivisible.dev
