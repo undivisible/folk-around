@@ -1,0 +1,33 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  release:
+    runs-on: macos-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      - name: Build binaries
+        run: |
+          zig build -Doptimize=ReleaseFast
+          zig build -Dapp -Doptimize=ReleaseFast
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            zig-out/bin/folk-around
+            zig-out/bin/FolkAround
+          tag_name: ${{ github.ref_name }}

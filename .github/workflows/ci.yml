@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      - name: Build CLI
+        run: zig build -Doptimize=ReleaseFast
+
+      - name: Build App
+        run: zig build -Dapp -Doptimize=ReleaseFast
+
+      - name: Run tests
+        run: zig build test
+
+  signal-server:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bunstack: canary
+
+      - name: Install Dependencies
+        run: bun install
+        working-directory: signal-server
+
+      - name: Typecheck
+        run: bun run typecheck
+        working-directory: signal-server
