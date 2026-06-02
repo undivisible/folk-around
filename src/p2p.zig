@@ -2,11 +2,7 @@
 ///
 /// Connects to a Cloudflare Workers signaling server via WebSocket.
 /// Exchanges identity keys and connection metadata with peers.
-/// Falls back to relay through the signaling server if direct connect fails.
-///
-/// Wire protocol (after Noise handshake establishes encrypted tunnel):
-/// [4 bytes: frame length BE] [1 byte: type] [encrypted payload]
-///   type 0x01 = MCP message, 0x02 = ping, 0x03 = pong, 0x04 = close
+/// Processes incoming MCP relay messages from peers.
 const std = @import("std");
 const builtin = @import("builtin");
 
@@ -30,30 +26,29 @@ pub const P2PConfig = struct {
     relay_fallback: bool = true,
 };
 
+const MCPHandler = *const fn (Allocator, []const u8) anyerror!?[]u8;
+
 pub const P2PManager = struct {
-    allocator: std.mem.Allocator,
+    allocator: Allocator,
     config: P2PConfig,
     identity_public: [32]u8,
     identity_secret: [32]u8,
     running: bool,
     verbose: bool,
     signal_thread: ?std.Thread,
+    mcp_handler: ?MCPHandler,
+    peer_identity: ?[]u8,
 
-    pub fn init(allocator: std.mem.Allocator, config: P2PConfig, verbose: bool) !P2PManager {
-        // Generate or load identity keypair
+    pub fn init(allocator: Allocator, config: P2PConfig, verbose: bool) !P2PManager {
         const keypair = if (config.identity_secret_hex) |hex| blk: {
             var seckey: [32]u8 = undefined;
-
-            // Decode existing key
             const decoded = try std.fmt.hexToBytes(&seckey, hex);
             if (decoded.len != 32) return error.InvalidKeyLength;
-            // Derive public key from secret (X25519)
             break :blk std.crypto.dh.X25519.KeyPair{
                 .public_key = try derivePublicKey(seckey),
                 .secret_key = seckey,
             };
         } else blk: {
-            // Generate fresh keypair
             const io = std.Io.Threaded.global_single_threaded.io();
             break :blk std.crypto.dh.X25519.KeyPair.generate(io);
         };
@@ -66,6 +61,8 @@ pub const P2PManager = struct {
             .running = false,
             .verbose = verbose,
             .signal_thread = null,
+            .mcp_handler = null,
+            .peer_identity = null,
         };
     }
 
@@ -77,6 +74,7 @@ pub const P2PManager = struct {
 
     pub fn stop(self: *P2PManager) void {
         self.running = false;
+        if (self.peer_identity) |p| self.allocator.free(p);
     }
 
     pub fn identityHex(self: *P2PManager, buf: []u8) ![]u8 {
@@ -147,7 +145,89 @@ pub const P2PManager = struct {
                 else => |e| return e,
             };
             defer self.allocator.free(next);
-            if (self.verbose) std.debug.print("[folk] signaling recv: {s}\n", .{next});
+            self.handleSignalMessage(conn, io, next) catch |err| {
+                if (self.verbose) std.debug.print("[folk] signal msg err: {s}\n", .{@errorName(err)});
+            };
+        }
+    }
+
+    fn handleSignalMessage(self: *P2PManager, conn: *std.http.Client.Connection, io: std.Io, raw: []const u8) !void {
+        const parsed = try std.json.parseFromSliceLeaky(std.json.Value, self.allocator, raw, .{});
+        if (parsed != .object) return;
+        const msg_type = (parsed.object.get("type") orelse return).string;
+
+        // Handle peer joining — send offer
+        if (std.mem.eql(u8, msg_type, "peer_joined")) {
+            const peer = parsed.object.get("identity") orelse return;
+            if (peer != .string) return;
+            if (self.verbose) std.debug.print("[folk] peer joined: {s}\n", .{peer.string});
+
+            if (self.peer_identity) |old| self.allocator.free(old);
+            self.peer_identity = try self.allocator.dupe(u8, peer.string);
+
+            var id_hex_buf: [128]u8 = undefined;
+            const id_hex = try self.identityHex(&id_hex_buf);
+            const offer = try std.fmt.allocPrint(self.allocator, "{{\"type\":\"offer\",\"from\":\"{s}\",\"to\":\"{s}\",\"data\":{{\"type\":\"mcp_relay\"}}}}", .{ id_hex, peer.string });
+            defer self.allocator.free(offer);
+            try writeClientMessage(self.allocator, io, conn, offer, .text);
+            if (self.verbose) std.debug.print("[folk] sent offer to {s}\n", .{peer.string});
+        }
+
+        // Handle incoming offer — send answer
+        if (std.mem.eql(u8, msg_type, "offer")) {
+            const from = parsed.object.get("from") orelse return;
+            if (from != .string) return;
+            if (self.verbose) std.debug.print("[folk] got offer from {s}, accepting\n", .{from.string});
+
+            if (self.peer_identity) |old| self.allocator.free(old);
+            self.peer_identity = try self.allocator.dupe(u8, from.string);
+
+            var id_hex_buf: [128]u8 = undefined;
+            const id_hex = try self.identityHex(&id_hex_buf);
+            const answer = try std.fmt.allocPrint(self.allocator, "{{\"type\":\"answer\",\"from\":\"{s}\",\"to\":\"{s}\",\"data\":{{\"type\":\"mcp_relay\",\"accepted\":true}}}}", .{ id_hex, from.string });
+            defer self.allocator.free(answer);
+            try writeClientMessage(self.allocator, io, conn, answer, .text);
+            if (self.verbose) std.debug.print("[folk] sent answer to {s}\n", .{from.string});
+        }
+
+        // Handle relay message — process MCP call
+        if (std.mem.eql(u8, msg_type, "relay")) {
+            const from = parsed.object.get("from") orelse return;
+            if (from != .string) return;
+            const data_val = parsed.object.get("data") orelse return;
+
+            var mcp_json: []const u8 = undefined;
+            var owns_json = false;
+            defer if (owns_json) self.allocator.free(mcp_json);
+
+            if (data_val == .string) {
+                mcp_json = data_val.string;
+            } else {
+                var buf: std.ArrayList(u8) = .empty;
+                defer buf.deinit(self.allocator);
+                var w: std.Io.Writer.Allocating = .fromArrayList(self.allocator, &buf);
+                try std.json.Stringify.value(data_val, .{}, &w.writer);
+                buf = w.toArrayList();
+                mcp_json = try buf.toOwnedSlice(self.allocator);
+                owns_json = true;
+            }
+
+            if (self.verbose) std.debug.print("[folk] relay from {s}\n", .{from.string});
+
+            if (self.mcp_handler) |handler| {
+                const result = handler(self.allocator, mcp_json) catch |err| {
+                    if (self.verbose) std.debug.print("[folk] mcp handler err: {s}\n", .{@errorName(err)});
+                    return;
+                };
+                if (result) |resp| {
+                    defer self.allocator.free(resp);
+                    var id_hex_buf: [128]u8 = undefined;
+                    const id_hex = try self.identityHex(&id_hex_buf);
+                    const reply = try std.fmt.allocPrint(self.allocator, "{{\"type\":\"relay\",\"from\":\"{s}\",\"to\":\"{s}\",\"data\":{s}}}", .{ id_hex, from.string, resp });
+                    defer self.allocator.free(reply);
+                    try writeClientMessage(self.allocator, io, conn, reply, .text);
+                }
+            }
         }
     }
 };
@@ -171,9 +251,6 @@ fn sleepSeconds(allocator: Allocator, seconds: i64) void {
 }
 
 fn derivePublicKey(secret: [32]u8) ![32]u8 {
-    // X25519 scalar multiplication
-    // std.crypto.dh.X25519.scalarMultiply(pub, secret)
-    // Requires Zig's std.crypto which needs specific Zig version support
     return std.crypto.dh.X25519.recoverPublicKey(secret);
 }
 
@@ -187,29 +264,20 @@ fn signalWebSocketUrl(allocator: Allocator, raw_url: []const u8, room: []const u
         try std.fmt.allocPrint(allocator, "https://{s}", .{raw_url});
     const owns_base = base.ptr != raw_url.ptr;
     defer if (owns_base) allocator.free(base);
-
     const scheme_end = std.mem.indexOf(u8, base, "://") orelse return error.InvalidSignalUrl;
-    const ws_scheme = if (std.mem.eql(u8, base[0..scheme_end], "http"))
-        "ws"
-    else if (std.mem.eql(u8, base[0..scheme_end], "https"))
-        "wss"
-    else
-        base[0..scheme_end];
-
+    const ws_scheme = if (std.mem.eql(u8, base[0..scheme_end], "http")) "ws" else if (std.mem.eql(u8, base[0..scheme_end], "https")) "wss" else base[0..scheme_end];
     const rest = std.mem.trimEnd(u8, base[scheme_end + 3 ..], "/");
     return std.fmt.allocPrint(allocator, "{s}://{s}/signal/{s}", .{ ws_scheme, rest, room });
 }
 
 fn validateAccept(headers: []const u8, key: []const u8) !void {
     const value = findHeader(headers, "sec-websocket-accept") orelse return error.WebSocketAcceptMissing;
-
     const guid = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
     var sha = std.crypto.hash.Sha1.init(.{});
     sha.update(key);
     sha.update(guid);
     var digest: [std.crypto.hash.Sha1.digest_length]u8 = undefined;
     sha.final(&digest);
-
     var expected_buf: [std.base64.standard.Encoder.calcSize(digest.len)]u8 = undefined;
     const expected = std.base64.standard.Encoder.encode(&expected_buf, &digest);
     if (!std.mem.eql(u8, std.mem.trim(u8, value, " \t\r\n"), expected)) return error.WebSocketAcceptMismatch;
@@ -226,16 +294,9 @@ fn findHeader(headers: []const u8, name: []const u8) ?[]const u8 {
     return null;
 }
 
-fn writeClientMessage(
-    allocator: Allocator,
-    io: std.Io,
-    conn: *std.http.Client.Connection,
-    payload: []const u8,
-    opcode: WebSocketOpcode,
-) !void {
+fn writeClientMessage(allocator: Allocator, io: std.Io, conn: *std.http.Client.Connection, payload: []const u8, opcode: WebSocketOpcode) !void {
     var frame: std.ArrayList(u8) = .empty;
     defer frame.deinit(allocator);
-
     try frame.append(allocator, 0x80 | @as(u8, @intFromEnum(opcode)));
     if (payload.len <= 125) {
         try frame.append(allocator, 0x80 | @as(u8, @intCast(payload.len)));
@@ -246,12 +307,10 @@ fn writeClientMessage(
         try frame.append(allocator, 0x80 | 127);
         try appendInt(&frame, allocator, u64, @intCast(payload.len));
     }
-
     var mask: [4]u8 = undefined;
     io.random(&mask);
     try frame.appendSlice(allocator, &mask);
     for (payload, 0..) |byte, i| try frame.append(allocator, byte ^ mask[i % 4]);
-
     const writer = conn.writer();
     try writer.writeAll(frame.items);
     try conn.flush();
@@ -277,18 +336,15 @@ fn readServerMessage(allocator: Allocator, conn: *std.http.Client.Connection) ![
             len = std.math.cast(usize, try reader.takeInt(u64, .big)) orelse return error.FrameTooLarge;
         }
         if (len > MAX_FRAME_SIZE) return error.FrameTooLarge;
-
         var mask: [4]u8 = .{ 0, 0, 0, 0 };
         if (masked) mask = (try reader.takeArray(4)).*;
-
         const payload = try allocator.alloc(u8, len);
         errdefer allocator.free(payload);
         const read_payload = try reader.take(len);
         @memcpy(payload, read_payload);
         if (masked) {
-            for (payload, 0..) |*byte, i| byte.* ^= mask[i % 4];
+            for (payload, 0..) |*b, i| b.* ^= mask[i % 4];
         }
-
         switch (opcode) {
             .text, .binary => return payload,
             .ping => {
@@ -308,18 +364,6 @@ fn readServerMessage(allocator: Allocator, conn: *std.http.Client.Connection) ![
     }
 }
 
-/// Wire protocol frame:
-/// [4 bytes BE: total length (including type byte)]
-/// [1 byte: type]
-///   - 0x01: MCP message (JSON-RPC 2.0 payload)
-///   - 0x02: ping
-///   - 0x03: pong
-///   - 0x04: close
-/// [remaining: encrypted payload]
-///
-/// Encryption: XChaCha20-Poly1305 with key derived from Noise handshake
-///
-/// Frame size max: 256 KB (to keep latency low and avoid fragmentation)
 pub const FrameType = enum(u8) {
     mcp_message = 0x01,
     ping = 0x02,
@@ -331,14 +375,12 @@ pub const FrameType = enum(u8) {
 pub const MAX_FRAME_SIZE = 256 * 1024;
 
 pub fn encodeFrame(allocator: std.mem.Allocator, frame_type: FrameType, payload: []const u8) ![]u8 {
-    const total_len = 5 + payload.len; // 4 len + 1 type + payload
+    const total_len = 5 + payload.len;
     const buf = try allocator.alloc(u8, total_len);
     errdefer allocator.free(buf);
-
     std.mem.writeIntBig(u32, buf[0..4], @intCast(total_len));
     buf[4] = @intFromEnum(frame_type);
     @memcpy(buf[5..], payload);
-
     return buf;
 }
 

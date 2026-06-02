@@ -8,6 +8,18 @@ const p2p = @import("p2p.zig");
 const shell = @import("shell.zig");
 const tools = @import("tools.zig");
 
+var global_tool_table: ?*tools.ToolTable = null;
+var global_verbose = false;
+
+fn relayHandler(alloc: std.mem.Allocator, msg_json: []const u8) !?[]u8 {
+    const table = global_tool_table orelse return null;
+    const msg = std.json.parseFromSliceLeaky(std.json.Value, alloc, msg_json, .{}) catch |err| {
+        if (global_verbose) std.debug.print("[folk] relay json err: {s}\n", .{@errorName(err)});
+        return null;
+    };
+    return try mcp.handleMessage(alloc, global_verbose, table, msg);
+}
+
 pub fn main(init: std.process.Init.Minimal) !void {
     const allocator = std.heap.smp_allocator;
     const args = init.args.vector;
@@ -60,6 +72,8 @@ pub fn main(init: std.process.Init.Minimal) !void {
 
     var tool_table = tools.ToolTable.init(allocator, mode);
     defer tool_table.deinit();
+    global_tool_table = &tool_table;
+    global_verbose = verbose;
 
     if (signal_url) |url| {
         const room_value = room orelse saved_config.room orelse try app_config.generatePairingCode(allocator);
@@ -80,6 +94,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
             .signal_url = url,
             .room = room_value,
         }, verbose);
+        pm.mcp_handler = relayHandler;
         try pm.start();
         defer pm.stop();
         printPairingInstructions(url, room_value, port);
