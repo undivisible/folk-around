@@ -63,7 +63,7 @@ signal-server/ is a standalone TypeScript project. deploy:
 The worker creates Durable Objects per room. WebSocket-based signaling:
 - join/leave broadcast
 - offer/answer relay for connection metadata
-- relay messages for future NAT-traversed encrypted data
+- relay encrypted MCP messages after offer/answer handshake
 
 ## development notes
 
@@ -71,6 +71,6 @@ The worker creates Durable Objects per room. WebSocket-based signaling:
 - no package manager. all deps inline.
 - macos target primary (osascript, screencapture, pbcopy/pbpaste, appkit).
 - mac_app.zig uses cached Objective-C runtime calls with Cocoa/ApplicationServices frameworks.
-- p2p signaling is wired; full encrypted peer MCP relay still needs session/tunnel work.
+- p2p signaling is wired; encrypted peer MCP relay uses X25519-derived session keys over the signaling relay.
 - signal-server fully functional: deploy for signaling; use --http for the local MCP endpoint.
 - linux fallback possible via xdotool/etc (no menu bar app).

@@ -42,7 +42,7 @@ Running `folk-around` with no transport flags reuses the last saved transport se
 `folk-around --http 8080` — runs an HTTP server with SSE. Clients connect at `http://localhost:8080/sse`. Tunnel via `ssh -L` or Tailscale for remote access.
 
 ### P2P
-`folk-around --p2p` or `folk-around --signal-server <host>` prints a pairing code, joins that signaling room over WebSocket, announces this daemon identity, and starts local HTTP MCP on port 8080 by default. Give the pairing code and signaling server to the client. Full encrypted peer-to-peer MCP relay is still future work.
+`folk-around --p2p` or `folk-around --signal-server <host>` prints a pairing code, joins that signaling room over WebSocket, announces this daemon identity, and starts local HTTP MCP on port 8080 by default. Give the pairing code and signaling server to the client. Peers complete an offer/answer handshake, derive a shared X25519 session key, and encrypt relayed MCP payloads with XChaCha20-Poly1305 before command execution.
 
 Hosted signalling server and status page: `https://folkaround.undivisible.dev`
 

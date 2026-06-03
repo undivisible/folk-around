@@ -7,6 +7,8 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 const Allocator = std.mem.Allocator;
+const RelayAead = std.crypto.aead.chacha_poly.XChaCha20Poly1305;
+const relay_ad = "folk-around p2p relay v1";
 const WebSocketOpcode = enum(u4) {
     continuation = 0,
     text = 1,
@@ -27,6 +29,11 @@ pub const P2PConfig = struct {
 };
 
 const MCPHandler = *const fn (Allocator, []const u8) anyerror!?[]u8;
+const HandshakeState = enum {
+    none,
+    offered,
+    established,
+};
 
 pub const P2PManager = struct {
     allocator: Allocator,
@@ -38,6 +45,8 @@ pub const P2PManager = struct {
     signal_thread: ?std.Thread,
     mcp_handler: ?MCPHandler,
     peer_identity: ?[]u8,
+    session_key: ?[RelayAead.key_length]u8,
+    handshake_state: HandshakeState,
 
     pub fn init(allocator: Allocator, config: P2PConfig, verbose: bool) !P2PManager {
         const keypair = if (config.identity_secret_hex) |hex| blk: {
@@ -63,6 +72,8 @@ pub const P2PManager = struct {
             .signal_thread = null,
             .mcp_handler = null,
             .peer_identity = null,
+            .session_key = null,
+            .handshake_state = .none,
         };
     }
 
@@ -186,7 +197,16 @@ pub const P2PManager = struct {
             if (from != .string) return;
             if (self.verbose) std.debug.print("[folk] got offer from {s}, accepting\n", .{from.string});
 
+            try self.establishSession(from.string);
             try self.sendAnswer(conn, io, from.string);
+        }
+
+        if (std.mem.eql(u8, msg_type, "answer")) {
+            const from = parsed.object.get("from") orelse return;
+            if (from != .string) return;
+            if (self.verbose) std.debug.print("[folk] got answer from {s}\n", .{from.string});
+
+            try self.establishSession(from.string);
         }
 
         // Handle relay message — process MCP call
@@ -195,39 +215,37 @@ pub const P2PManager = struct {
             if (from != .string) return;
             const data_val = parsed.object.get("data") orelse return;
 
-            var mcp_json: []const u8 = undefined;
-            var owns_json = false;
-            defer if (owns_json) self.allocator.free(mcp_json);
-
-            if (data_val == .string) {
-                mcp_json = data_val.string;
-            } else {
-                var buf: std.ArrayList(u8) = .empty;
-                defer buf.deinit(self.allocator);
-                var w: std.Io.Writer.Allocating = .fromArrayList(self.allocator, &buf);
-                try std.json.Stringify.value(data_val, .{}, &w.writer);
-                buf = w.toArrayList();
-                mcp_json = try buf.toOwnedSlice(self.allocator);
-                owns_json = true;
-            }
-
             if (self.verbose) std.debug.print("[folk] relay from {s}\n", .{from.string});
 
             if (self.mcp_handler) |handler| {
+                const mcp_json = self.decryptRelayDataValue(self.allocator, data_val) catch |err| {
+                    if (self.verbose) std.debug.print("[folk] relay decrypt err: {s}\n", .{@errorName(err)});
+                    return;
+                };
+                defer self.allocator.free(mcp_json);
                 const result = handler(self.allocator, mcp_json) catch |err| {
                     if (self.verbose) std.debug.print("[folk] mcp handler err: {s}\n", .{@errorName(err)});
                     return;
                 };
                 if (result) |resp| {
                     defer self.allocator.free(resp);
+                    const encrypted = try self.encryptRelayPayload(self.allocator, resp);
+                    defer self.allocator.free(encrypted);
                     var id_hex_buf: [128]u8 = undefined;
                     const id_hex = try self.identityHex(&id_hex_buf);
-                    const reply = try std.fmt.allocPrint(self.allocator, "{{\"type\":\"relay\",\"from\":\"{s}\",\"to\":\"{s}\",\"data\":{s}}}", .{ id_hex, from.string, resp });
+                    const reply = try std.fmt.allocPrint(self.allocator, "{{\"type\":\"relay\",\"from\":\"{s}\",\"to\":\"{s}\",\"data\":{s}}}", .{ id_hex, from.string, encrypted });
                     defer self.allocator.free(reply);
                     try writeClientMessage(self.allocator, io, conn, reply, .text);
                 }
             }
         }
+    }
+
+    pub fn establishSession(self: *P2PManager, peer: []const u8) !void {
+        const peer_public = try parseIdentityHex(peer);
+        self.session_key = try deriveSessionKey(self.identity_secret, self.identity_public, peer_public);
+        self.handshake_state = .established;
+        try self.setPeer(peer);
     }
 
     fn setPeer(self: *P2PManager, peer: []const u8) !void {
@@ -237,6 +255,7 @@ pub const P2PManager = struct {
 
     fn sendOffer(self: *P2PManager, conn: *std.http.Client.Connection, io: std.Io, peer: []const u8) !void {
         try self.setPeer(peer);
+        self.handshake_state = .offered;
         var id_hex_buf: [128]u8 = undefined;
         const id_hex = try self.identityHex(&id_hex_buf);
         const offer = try std.fmt.allocPrint(self.allocator, "{{\"type\":\"offer\",\"from\":\"{s}\",\"to\":\"{s}\",\"data\":{{\"type\":\"mcp_relay\"}}}}", .{ id_hex, peer });
@@ -246,13 +265,81 @@ pub const P2PManager = struct {
     }
 
     fn sendAnswer(self: *P2PManager, conn: *std.http.Client.Connection, io: std.Io, peer: []const u8) !void {
-        try self.setPeer(peer);
+        if (self.handshake_state != .established) try self.establishSession(peer);
         var id_hex_buf: [128]u8 = undefined;
         const id_hex = try self.identityHex(&id_hex_buf);
         const answer = try std.fmt.allocPrint(self.allocator, "{{\"type\":\"answer\",\"from\":\"{s}\",\"to\":\"{s}\",\"data\":{{\"type\":\"mcp_relay\",\"accepted\":true}}}}", .{ id_hex, peer });
         defer self.allocator.free(answer);
         try writeClientMessage(self.allocator, io, conn, answer, .text);
         if (self.verbose) std.debug.print("[folk] sent answer to {s}\n", .{peer});
+    }
+
+    pub fn encryptRelayPayload(self: *P2PManager, allocator: Allocator, plaintext: []const u8) ![]u8 {
+        const key = self.session_key orelse return error.HandshakeRequired;
+        if (self.handshake_state != .established) return error.HandshakeRequired;
+
+        var threaded = std.Io.Threaded.init(allocator, .{});
+        defer threaded.deinit();
+        const io = threaded.io();
+        var nonce: [RelayAead.nonce_length]u8 = undefined;
+        io.random(&nonce);
+
+        var ciphertext = try allocator.alloc(u8, plaintext.len + RelayAead.tag_length);
+        errdefer allocator.free(ciphertext);
+        RelayAead.encrypt(ciphertext[0..plaintext.len], ciphertext[plaintext.len..][0..RelayAead.tag_length], plaintext, relay_ad, nonce, key);
+
+        const nonce_hex = try hexAlloc(allocator, &nonce);
+        defer allocator.free(nonce_hex);
+        const ciphertext_hex = try hexAlloc(allocator, ciphertext);
+        defer allocator.free(ciphertext_hex);
+        allocator.free(ciphertext);
+
+        return try std.fmt.allocPrint(allocator, "{{\"v\":1,\"alg\":\"xchacha20poly1305\",\"nonce\":\"{s}\",\"ciphertext\":\"{s}\"}}", .{ nonce_hex, ciphertext_hex });
+    }
+
+    pub fn decryptRelayPayload(self: *P2PManager, allocator: Allocator, encrypted: []const u8) ![]u8 {
+        const key = self.session_key orelse return error.HandshakeRequired;
+        if (self.handshake_state != .established) return error.HandshakeRequired;
+
+        var arena = std.heap.ArenaAllocator.init(allocator);
+        defer arena.deinit();
+        const message_allocator = arena.allocator();
+        const parsed = try std.json.parseFromSliceLeaky(std.json.Value, message_allocator, encrypted, .{});
+        if (parsed != .object) return error.InvalidEncryptedPayload;
+        const version = parsed.object.get("v") orelse return error.InvalidEncryptedPayload;
+        if (version != .integer or version.integer != 1) return error.InvalidEncryptedPayload;
+        const alg = parsed.object.get("alg") orelse return error.InvalidEncryptedPayload;
+        if (alg != .string or !std.mem.eql(u8, alg.string, "xchacha20poly1305")) return error.InvalidEncryptedPayload;
+        const nonce_value = parsed.object.get("nonce") orelse return error.InvalidEncryptedPayload;
+        const ciphertext_value = parsed.object.get("ciphertext") orelse return error.InvalidEncryptedPayload;
+        if (nonce_value != .string or ciphertext_value != .string) return error.InvalidEncryptedPayload;
+
+        const nonce_bytes = try hexToOwnedBytes(allocator, nonce_value.string);
+        defer allocator.free(nonce_bytes);
+        if (nonce_bytes.len != RelayAead.nonce_length) return error.InvalidEncryptedPayload;
+        const ciphertext = try hexToOwnedBytes(allocator, ciphertext_value.string);
+        defer allocator.free(ciphertext);
+        if (ciphertext.len < RelayAead.tag_length) return error.InvalidEncryptedPayload;
+
+        var nonce: [RelayAead.nonce_length]u8 = undefined;
+        @memcpy(&nonce, nonce_bytes);
+        const body_len = ciphertext.len - RelayAead.tag_length;
+        const plaintext = try allocator.alloc(u8, body_len);
+        errdefer allocator.free(plaintext);
+        try RelayAead.decrypt(plaintext, ciphertext[0..body_len], ciphertext[body_len..][0..RelayAead.tag_length].*, relay_ad, nonce, key);
+        return plaintext;
+    }
+
+    fn decryptRelayDataValue(self: *P2PManager, allocator: Allocator, data_val: std.json.Value) ![]u8 {
+        if (data_val == .string) return try self.decryptRelayPayload(allocator, data_val.string);
+        var buf: std.ArrayList(u8) = .empty;
+        defer buf.deinit(allocator);
+        var w: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+        try std.json.Stringify.value(data_val, .{}, &w.writer);
+        buf = w.toArrayList();
+        const encrypted = try buf.toOwnedSlice(allocator);
+        defer allocator.free(encrypted);
+        return try self.decryptRelayPayload(allocator, encrypted);
     }
 };
 
@@ -276,6 +363,50 @@ fn sleepSeconds(allocator: Allocator, seconds: i64) void {
 
 fn derivePublicKey(secret: [32]u8) ![32]u8 {
     return std.crypto.dh.X25519.recoverPublicKey(secret);
+}
+
+fn parseIdentityHex(hex: []const u8) ![32]u8 {
+    if (hex.len != 64) return error.InvalidPeerIdentity;
+    var public: [32]u8 = undefined;
+    const decoded = std.fmt.hexToBytes(&public, hex) catch return error.InvalidPeerIdentity;
+    if (decoded.len != public.len) return error.InvalidPeerIdentity;
+    return public;
+}
+
+fn deriveSessionKey(local_secret: [32]u8, local_public: [32]u8, peer_public: [32]u8) ![RelayAead.key_length]u8 {
+    const shared = try std.crypto.dh.X25519.scalarmult(local_secret, peer_public);
+    var salt: [64]u8 = undefined;
+    if (std.mem.order(u8, &local_public, &peer_public) == .lt) {
+        @memcpy(salt[0..32], &local_public);
+        @memcpy(salt[32..64], &peer_public);
+    } else {
+        @memcpy(salt[0..32], &peer_public);
+        @memcpy(salt[32..64], &local_public);
+    }
+    const prk = std.crypto.kdf.hkdf.HkdfSha256.extract(&salt, &shared);
+    var key: [RelayAead.key_length]u8 = undefined;
+    std.crypto.kdf.hkdf.HkdfSha256.expand(&key, relay_ad, prk);
+    return key;
+}
+
+fn hexAlloc(allocator: Allocator, bytes: []const u8) ![]u8 {
+    const out = try allocator.alloc(u8, bytes.len * 2);
+    errdefer allocator.free(out);
+    const charset = "0123456789abcdef";
+    for (bytes, 0..) |byte, i| {
+        out[i * 2] = charset[byte >> 4];
+        out[i * 2 + 1] = charset[byte & 0x0f];
+    }
+    return out;
+}
+
+fn hexToOwnedBytes(allocator: Allocator, hex: []const u8) ![]u8 {
+    if (hex.len % 2 != 0) return error.InvalidEncryptedPayload;
+    const out = try allocator.alloc(u8, hex.len / 2);
+    errdefer allocator.free(out);
+    const decoded = std.fmt.hexToBytes(out, hex) catch return error.InvalidEncryptedPayload;
+    if (decoded.len != out.len) return error.InvalidEncryptedPayload;
+    return out;
 }
 
 fn signalWebSocketUrl(allocator: Allocator, raw_url: []const u8, room: []const u8) ![]u8 {
@@ -434,4 +565,53 @@ test "frame round trips payload" {
     const decoded = try decodeFrame(encoded);
     try std.testing.expectEqual(FrameType.mcp_message, decoded.frame_type);
     try std.testing.expectEqualStrings("hello", decoded.payload);
+}
+
+test "session keys match for peer identities" {
+    var left_secret = [_]u8{0} ** 32;
+    var right_secret = [_]u8{0} ** 32;
+    left_secret[0] = 1;
+    right_secret[0] = 2;
+
+    const left_public = try derivePublicKey(left_secret);
+    const right_public = try derivePublicKey(right_secret);
+    const left_key = try deriveSessionKey(left_secret, left_public, right_public);
+    const right_key = try deriveSessionKey(right_secret, right_public, left_public);
+
+    try std.testing.expectEqualSlices(u8, &left_key, &right_key);
+}
+
+test "relay payload requires established handshake" {
+    const allocator = std.testing.allocator;
+    var manager = try P2PManager.init(allocator, .{}, false);
+    defer manager.stop();
+
+    try std.testing.expectError(error.HandshakeRequired, manager.decryptRelayPayload(allocator, "plain"));
+}
+
+test "relay payload encrypts and authenticates mcp json" {
+    const allocator = std.testing.allocator;
+    var left = try P2PManager.init(allocator, .{}, false);
+    defer left.stop();
+    var right = try P2PManager.init(allocator, .{}, false);
+    defer right.stop();
+
+    var left_id_buf: [64]u8 = undefined;
+    var right_id_buf: [64]u8 = undefined;
+    const left_id = try left.identityHex(&left_id_buf);
+    const right_id = try right.identityHex(&right_id_buf);
+    try left.establishSession(right_id);
+    try right.establishSession(left_id);
+
+    const plaintext = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}";
+    const encrypted = try left.encryptRelayPayload(allocator, plaintext);
+    defer allocator.free(encrypted);
+    try std.testing.expect(std.mem.indexOf(u8, encrypted, "jsonrpc") == null);
+
+    const decrypted = try right.decryptRelayPayload(allocator, encrypted);
+    defer allocator.free(decrypted);
+    try std.testing.expectEqualStrings(plaintext, decrypted);
+
+    encrypted[encrypted.len - 3] = if (encrypted[encrypted.len - 3] == 'a') 'b' else 'a';
+    try std.testing.expectError(error.AuthenticationFailed, right.decryptRelayPayload(allocator, encrypted));
 }

@@ -34,7 +34,7 @@ folk_tell, folk_screenshot
 No transport flags: Reuse the last saved transport, or stdio if none is saved.
 stdio: Use --stdio for MCP protocol over stdin/stdout. Pipe to any MCP client.
 HTTP SSE: Use --http <port>. GET /sse for events, POST /message for calls.
-Signaling: Use --p2p or --signal-server <url>. Prints a pairing code, joins /signal/<room>, and starts local HTTP MCP. The last server, code, port, and mode are saved under ~/.config/folk-around/config.
+Signaling: Use --p2p or --signal-server <url>. Prints a pairing code, joins /signal/<room>, starts local HTTP MCP, completes offer/answer, and encrypts relayed MCP payloads. The last server, code, port, and mode are saved under ~/.config/folk-around/config.
 
 ## Examples
 
