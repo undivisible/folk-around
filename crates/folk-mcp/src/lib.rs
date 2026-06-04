@@ -1,0 +1,275 @@
+use std::collections::BTreeMap;
+use std::sync::Arc;
+
+use folk_core::AccessMode;
+use serde_json::{Value, json};
+use thiserror::Error;
+
+pub type ToolResult = Result<Value, ToolError>;
+pub type ToolHandler = dyn Fn(Value, AccessMode) -> ToolResult + Send + Sync;
+
+#[derive(Clone)]
+pub struct Tool {
+    pub name: &'static str,
+    pub description: &'static str,
+    pub input_schema: Value,
+    pub handler: Arc<ToolHandler>,
+}
+
+#[derive(Clone)]
+pub struct ToolTable {
+    mode: AccessMode,
+    tools: Vec<Tool>,
+}
+
+#[derive(Debug, Error)]
+pub enum ToolError {
+    #[error("{0}")]
+    Message(String),
+}
+
+impl ToolTable {
+    pub fn new(mode: AccessMode) -> Self {
+        Self {
+            mode,
+            tools: Vec::new(),
+        }
+    }
+
+    pub fn register<F>(
+        &mut self,
+        name: &'static str,
+        description: &'static str,
+        input_schema: Value,
+        handler: F,
+    ) where
+        F: Fn(Value, AccessMode) -> ToolResult + Send + Sync + 'static,
+    {
+        self.tools.push(Tool {
+            name,
+            description,
+            input_schema,
+            handler: Arc::new(handler),
+        });
+    }
+
+    pub fn list(&self) -> &[Tool] {
+        &self.tools
+    }
+
+    pub fn call(&self, name: &str, arguments: Value) -> Value {
+        for tool in &self.tools {
+            if tool.name == name {
+                return match (tool.handler)(arguments, self.mode) {
+                    Ok(value) => value,
+                    Err(err) => err_result(err.to_string()),
+                };
+            }
+        }
+        err_result("not found")
+    }
+}
+
+pub fn text_result(text: impl Into<String>) -> Value {
+    json!({
+        "content": [
+            {
+                "type": "text",
+                "text": text.into()
+            }
+        ]
+    })
+}
+
+pub fn json_text_result(value: &Value) -> Value {
+    text_result(value.to_string())
+}
+
+pub fn err_result(text: impl Into<String>) -> Value {
+    let mut value = text_result(text);
+    if let Value::Object(map) = &mut value {
+        map.insert("isError".to_string(), Value::Bool(true));
+    }
+    value
+}
+
+pub fn object_schema(
+    properties: BTreeMap<&'static str, Value>,
+    required: &[&'static str],
+) -> Value {
+    let mut schema = json!({
+        "type": "object",
+        "properties": properties,
+    });
+    if !required.is_empty() {
+        schema["required"] = Value::Array(
+            required
+                .iter()
+                .map(|field| Value::String((*field).to_string()))
+                .collect(),
+        );
+    }
+    schema
+}
+
+pub fn string_property(description: &'static str) -> Value {
+    json!({
+        "type": "string",
+        "description": description
+    })
+}
+
+pub fn number_property(description: &'static str) -> Value {
+    json!({
+        "type": "number",
+        "description": description
+    })
+}
+
+pub fn handle_message(
+    verbose: bool,
+    table: &ToolTable,
+    msg: Value,
+) -> Result<Option<String>, serde_json::Error> {
+    let Value::Object(object) = msg else {
+        return Ok(None);
+    };
+    let Some(Value::String(method)) = object.get("method") else {
+        return Ok(None);
+    };
+    let id = object.get("id").cloned();
+    let is_notification = id.as_ref().is_none_or(Value::is_null);
+
+    if verbose {
+        eprintln!("[folk] <- {method}");
+    }
+
+    match method.as_str() {
+        "initialize" => {
+            if is_notification {
+                return Ok(None);
+            }
+            json_response(
+                id.unwrap_or(Value::Null),
+                json!({
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {
+                        "tools": {
+                            "listChanged": false
+                        }
+                    },
+                    "serverInfo": {
+                        "name": "folk-around",
+                        "version": "0.1.0"
+                    }
+                }),
+            )
+            .map(Some)
+        }
+        "notifications/initialized" => Ok(None),
+        "ping" => {
+            if is_notification {
+                return Ok(None);
+            }
+            json_response(id.unwrap_or(Value::Null), json!({})).map(Some)
+        }
+        "tools/list" => {
+            if is_notification {
+                return Ok(None);
+            }
+            let tools = table
+                .list()
+                .iter()
+                .map(|tool| {
+                    json!({
+                        "name": tool.name,
+                        "description": tool.description,
+                        "inputSchema": tool.input_schema,
+                    })
+                })
+                .collect::<Vec<_>>();
+            json_response(id.unwrap_or(Value::Null), json!({ "tools": tools })).map(Some)
+        }
+        "tools/call" => {
+            if is_notification {
+                return Ok(None);
+            }
+            let id = id.unwrap_or(Value::Null);
+            let Some(Value::Object(params)) = object.get("params") else {
+                return error_response(id, -32602, "Missing params").map(Some);
+            };
+            let Some(Value::String(name)) = params.get("name") else {
+                return error_response(id, -32602, "Missing name").map(Some);
+            };
+            let arguments = params
+                .get("arguments")
+                .cloned()
+                .unwrap_or_else(|| json!({}));
+            if verbose {
+                eprintln!("[folk] tool call: {name} {arguments}");
+            }
+            let result = table.call(name, arguments);
+            if verbose {
+                eprintln!("[folk] tool result: {name} {result}");
+            }
+            json_response(id, result).map(Some)
+        }
+        _ => {
+            if is_notification {
+                Ok(None)
+            } else {
+                error_response(id.unwrap_or(Value::Null), -32601, method).map(Some)
+            }
+        }
+    }
+}
+
+fn json_response(id: Value, result: Value) -> Result<String, serde_json::Error> {
+    serde_json::to_string(&json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "result": result
+    }))
+}
+
+fn error_response(id: Value, code: i32, message: &str) -> Result<String, serde_json::Error> {
+    serde_json::to_string(&json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "error": {
+            "code": code,
+            "message": message
+        }
+    }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn initialize_should_match_protocol_shape() {
+        let table = ToolTable::new(AccessMode::Full);
+        let response = handle_message(
+            false,
+            &table,
+            json!({"jsonrpc":"2.0","id":1,"method":"initialize"}),
+        )
+        .unwrap()
+        .unwrap();
+        let value: Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(value["result"]["protocolVersion"], "2024-11-05");
+    }
+
+    #[test]
+    fn notification_should_not_respond() {
+        let table = ToolTable::new(AccessMode::Full);
+        let response = handle_message(
+            false,
+            &table,
+            json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
+        )
+        .unwrap();
+        assert!(response.is_none());
+    }
+}

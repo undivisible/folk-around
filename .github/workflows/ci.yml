@@ -7,6 +7,42 @@ on:
     branches: [main]
 
 jobs:
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6.0.3
+
+      - name: Detect Rust manifest
+        id: rust-manifest
+        run: |
+          if [ -f Cargo.toml ]; then
+            echo "has_cargo=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_cargo=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install Zig
+        if: ${{ steps.rust-manifest.outputs.has_cargo == 'true' }}
+        uses: mlugg/setup-zig@v2.2.1
+        with:
+          version: 0.16.0
+
+      - name: Rust format
+        if: ${{ steps.rust-manifest.outputs.has_cargo == 'true' }}
+        run: cargo fmt --all -- --check
+
+      - name: Rust lint
+        if: ${{ steps.rust-manifest.outputs.has_cargo == 'true' }}
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Rust tests
+        if: ${{ steps.rust-manifest.outputs.has_cargo == 'true' }}
+        run: cargo test --all-features
+
+      - name: Rust build
+        if: ${{ steps.rust-manifest.outputs.has_cargo == 'true' }}
+        run: cargo build --release
+
   build-macos:
     runs-on: macos-latest
     steps:
@@ -16,6 +52,9 @@ jobs:
         uses: mlugg/setup-zig@v2.2.1
         with:
           version: 0.16.0
+
+      - name: Check Zig format
+        run: zig fmt --check build.zig src/*.zig
 
       - name: Build CLI
         run: zig build -Doptimize=ReleaseFast
@@ -40,6 +79,22 @@ jobs:
         run: bun install
         working-directory: signal-server
 
+      - name: Format
+        run: bun run format
+        working-directory: signal-server
+
+      - name: Lint
+        run: bun run lint
+        working-directory: signal-server
+
       - name: Typecheck
         run: bun run typecheck
+        working-directory: signal-server
+
+      - name: Test
+        run: bun test
+        working-directory: signal-server
+
+      - name: Build
+        run: bun run build
         working-directory: signal-server

@@ -1,7 +1,7 @@
 # Documentation for /usr/local/bin/folk-around
 
 folk-around is an MCP (Model Context Protocol) daemon for computer control.
-It speaks MCP over stdio, HTTP SSE, or Cloudflare signaling plus local HTTP. Written in Zig.
+It speaks MCP over stdio, HTTP SSE, or Cloudflare signaling plus local HTTP. The main runtime is Rust after migration; Zig remains the legacy daemon module and macOS menu bar app.
 
 ## Usage
 
@@ -20,27 +20,28 @@ Options:
 ## Modes
 
 full — unrestricted shell, full access
-limited — read-only shell commands, no write
-sandbox — no shell, a11y + file ops only
+limited — safe-shell command allowlist
+sandbox — current compatibility behavior uses the same safe-shell command allowlist; folk_spawn remains full-only
 
 ## Tools
 
 folk_shell, folk_system_info, folk_list_apps, folk_spawn,
-folk_clipboard_read, folk_clipboard_write, folk_osascript,
-folk_tell, folk_screenshot
+folk_clipboard_read, folk_clipboard_write, folk_screen_capture,
+folk_ui_snapshot, folk_click, folk_type, folk_hotkey, folk_scroll,
+folk_window, folk_app, folk_menu
 
 ## Transports
 
-No transport flags: Reuse the last saved transport, or stdio if none is saved.
+No transport flags: Reuse the saved HTTP port, or stdio if none is saved.
 stdio: Use --stdio for MCP protocol over stdin/stdout. Pipe to any MCP client.
 HTTP SSE: Use --http <port>. GET /sse for events, POST /message for calls.
-Signaling: Use --p2p or --signal-server <url>. Prints a pairing code, joins /signal/<room>, starts local HTTP MCP, completes offer/answer, and encrypts relayed MCP payloads. The last server, code, port, and mode are saved under ~/.config/folk-around/config.
+Signaling: Use --p2p or --signal-server <url>. Prints a pairing code, joins /signal/<room>, starts local HTTP MCP, completes offer/answer, derives relay session keys from an X25519 shared secret, and encrypts relayed MCP payloads. The last server, code, port, and mode are saved under ~/.config/folk-around/config.
 
 ## Examples
 
-  folk-around                                          # reuse saved transport, or stdio if none is saved
+  folk-around                                          # reuse saved HTTP port, or stdio if none is saved
   folk-around --stdio                                  # force stdio mode, full access
-  folk-around --mode sandbox                          # sandbox mode
+  folk-around --mode sandbox                          # safe-shell compatibility mode
   folk-around --http 8080                             # HTTP SSE on port 8080
   folk-around --signal-server folkaround.undivisible.dev
   echo '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | folk-around

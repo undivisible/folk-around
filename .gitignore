@@ -1,5 +1,6 @@
 .zig-cache/
 zig-out/
+target/
 *.o
 signal-server/.wrangler/
 signal-server/node_modules/
