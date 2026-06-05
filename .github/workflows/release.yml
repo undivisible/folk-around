@@ -6,7 +6,61 @@ on:
       - 'v*'
 
 jobs:
+  rust-quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6.0.3
+
+      - name: Rust format
+        run: cargo fmt --all -- --check
+
+      - name: Rust lint
+        run: cargo clippy --all-targets --all-features --locked -- -D warnings
+
+      - name: Rust tests
+        run: cargo test --all-features --locked
+
+      - name: Rust build
+        run: cargo build --release --locked
+
+  signal-server-quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6.0.3
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2.2.0
+        with:
+          bun-version: canary
+
+      - name: Install Dependencies
+        run: bun install --frozen-lockfile
+        working-directory: signal-server
+
+      - name: Format
+        run: bun run format
+        working-directory: signal-server
+
+      - name: Lint
+        run: bun run lint
+        working-directory: signal-server
+
+      - name: Typecheck
+        run: bun run typecheck
+        working-directory: signal-server
+
+      - name: Test
+        run: bun test
+        working-directory: signal-server
+
+      - name: Build
+        run: bun run build
+        working-directory: signal-server
+
   rust-cli:
+    needs:
+      - rust-quality
+      - signal-server-quality
     strategy:
       fail-fast: false
       matrix:
@@ -31,7 +85,7 @@ jobs:
         run: rustup target add ${{ matrix.target }}
 
       - name: Build Rust CLI
-        run: cargo build --release --target ${{ matrix.target }}
+        run: cargo build --release --locked --target ${{ matrix.target }}
 
       - name: Stage Rust CLI
         run: |

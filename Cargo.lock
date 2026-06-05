@@ -378,7 +378,7 @@ checksum = "d9c4f5dac5e15c24eb999c26181a6ca40b39fe946cbe4c263c7209467bc83af2"
 
 [[package]]
 name = "folk-around"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "folk-computer-use",
  "folk-core",
@@ -389,7 +389,7 @@ dependencies = [
 
 [[package]]
 name = "folk-computer-use"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "folk-core",
  "folk-mcp",
@@ -400,7 +400,7 @@ dependencies = [
 
 [[package]]
 name = "folk-core"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "rand",
  "thiserror",
@@ -408,7 +408,7 @@ dependencies = [
 
 [[package]]
 name = "folk-mcp"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "folk-core",
  "serde",
@@ -418,7 +418,7 @@ dependencies = [
 
 [[package]]
 name = "folk-transport"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "base64",
  "chacha20poly1305",
@@ -968,7 +968,7 @@ dependencies = [
  "bitflags",
  "errno",
  "libc",
- "linux-raw-sys 0.12.1",
+ "linux-raw-sys",
  "windows-sys 0.61.2",
 ]
 
@@ -1182,7 +1182,7 @@ dependencies = [
  "fastrand",
  "getrandom 0.4.2",
  "once_cell",
- "rustix 1.1.4",
+ "rustix",
  "windows-sys 0.61.2",
 ]
 

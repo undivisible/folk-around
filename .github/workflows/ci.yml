@@ -27,15 +27,15 @@ jobs:
 
       - name: Rust lint
         if: ${{ steps.rust-manifest.outputs.has_cargo == 'true' }}
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy --all-targets --all-features --locked -- -D warnings
 
       - name: Rust tests
         if: ${{ steps.rust-manifest.outputs.has_cargo == 'true' }}
-        run: cargo test --all-features
+        run: cargo test --all-features --locked
 
       - name: Rust build
         if: ${{ steps.rust-manifest.outputs.has_cargo == 'true' }}
-        run: cargo build --release
+        run: cargo build --release --locked
 
   signal-server:
     runs-on: ubuntu-latest
@@ -48,7 +48,7 @@ jobs:
           bun-version: canary
 
       - name: Install Dependencies
-        run: bun install
+        run: bun install --frozen-lockfile
         working-directory: signal-server
 
       - name: Format
