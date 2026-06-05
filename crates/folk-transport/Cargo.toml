@@ -19,3 +19,6 @@ thiserror.workspace = true
 tungstenite.workspace = true
 url.workspace = true
 x25519-dalek.workspace = true
+
+[dev-dependencies]
+folk-core = { path = "../folk-core" }

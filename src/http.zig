@@ -149,7 +149,7 @@ pub fn run(allocator: std.mem.Allocator, verbose: bool, table: *tools.ToolTable,
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    var address: std.Io.net.IpAddress = .{ .ip4 = std.Io.net.Ip4Address.unspecified(port) };
+    var address = listenAddress(port);
     var server = try address.listen(io, .{ .reuse_address = true });
     defer server.deinit(io);
 
@@ -171,4 +171,15 @@ pub fn run(allocator: std.mem.Allocator, verbose: bool, table: *tools.ToolTable,
         };
         thread.detach();
     }
+}
+
+fn listenAddress(port: u16) std.Io.net.IpAddress {
+    return .{ .ip4 = std.Io.net.Ip4Address.loopback(port) };
+}
+
+test "http listen address is loopback only" {
+    const address = listenAddress(8080);
+    try std.testing.expect(address == .ip4);
+    try std.testing.expectEqualSlices(u8, &.{ 127, 0, 0, 1 }, &address.ip4.bytes);
+    try std.testing.expectEqual(@as(u16, 8080), address.ip4.port);
 }

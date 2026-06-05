@@ -64,7 +64,7 @@ pub fn run_stdio(verbose: bool, table: Arc<ToolTable>) -> Result<(), TransportEr
 }
 
 pub fn run_http(verbose: bool, table: Arc<ToolTable>, port: u16) -> Result<(), TransportError> {
-    let listener = TcpListener::bind(("0.0.0.0", port))?;
+    let listener = TcpListener::bind(http_bind_addr(port))?;
     if verbose {
         eprintln!("[folk] HTTP listening on http://127.0.0.1:{port}/");
     }
@@ -436,6 +436,7 @@ impl P2PManager {
         let data = parsed
             .get("data")
             .ok_or(TransportError::InvalidEncryptedPayload)?;
+        self.ensure_relay_sender(from)?;
         if self.verbose {
             eprintln!("[folk] relay from {from}");
         }
@@ -525,6 +526,17 @@ impl P2PManager {
             .map_err(|_| TransportError::Crypto)?;
         String::from_utf8(plaintext).map_err(|_| TransportError::InvalidEncryptedPayload)
     }
+
+    fn ensure_relay_sender(&self, from: &str) -> Result<(), TransportError> {
+        match self.peer_identity.as_deref() {
+            Some(peer) if peer == from => Ok(()),
+            _ => Err(TransportError::InvalidPeerIdentity),
+        }
+    }
+}
+
+fn http_bind_addr(port: u16) -> (&'static str, u16) {
+    ("127.0.0.1", port)
 }
 
 fn signal_websocket_url(raw_url: &str, room: &str) -> Result<Url, TransportError> {
@@ -578,6 +590,29 @@ mod tests {
     fn websocket_url_should_match_legacy_shape() {
         let url = signal_websocket_url("https://folkaround.undivisible.dev", "room").unwrap();
         assert_eq!(url.as_str(), "wss://folkaround.undivisible.dev/signal/room");
+    }
+
+    #[test]
+    fn http_bind_addr_should_be_loopback_only() {
+        assert_eq!(http_bind_addr(8080), ("127.0.0.1", 8080));
+    }
+
+    #[test]
+    fn relay_sender_should_match_established_peer() {
+        let table = Arc::new(ToolTable::new(folk_core::AccessMode::Full));
+        let mut manager =
+            P2PManager::new(false, table, "https://example.com".into(), "room".into());
+        let peer = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        manager.establish_session(peer).unwrap();
+
+        assert!(manager.ensure_relay_sender(peer).is_ok());
+        assert!(
+            manager
+                .ensure_relay_sender(
+                    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                )
+                .is_err()
+        );
     }
 
     #[test]

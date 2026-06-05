@@ -213,6 +213,7 @@ pub const P2PManager = struct {
         if (std.mem.eql(u8, msg_type, "relay")) {
             const from = parsed.object.get("from") orelse return;
             if (from != .string) return;
+            try self.ensureRelaySender(from.string);
             const data_val = parsed.object.get("data") orelse return;
 
             if (self.verbose) std.debug.print("[folk] relay from {s}\n", .{from.string});
@@ -251,6 +252,11 @@ pub const P2PManager = struct {
     fn setPeer(self: *P2PManager, peer: []const u8) !void {
         if (self.peer_identity) |old| self.allocator.free(old);
         self.peer_identity = try self.allocator.dupe(u8, peer);
+    }
+
+    fn ensureRelaySender(self: *P2PManager, from: []const u8) !void {
+        const peer = self.peer_identity orelse return error.InvalidPeerIdentity;
+        if (!std.mem.eql(u8, peer, from)) return error.InvalidPeerIdentity;
     }
 
     fn sendOffer(self: *P2PManager, conn: *std.http.Client.Connection, io: std.Io, peer: []const u8) !void {
@@ -614,4 +620,17 @@ test "relay payload encrypts and authenticates mcp json" {
 
     encrypted[encrypted.len - 3] = if (encrypted[encrypted.len - 3] == 'a') 'b' else 'a';
     try std.testing.expectError(error.AuthenticationFailed, right.decryptRelayPayload(allocator, encrypted));
+}
+
+test "relay sender must match established peer" {
+    const allocator = std.testing.allocator;
+    var manager = try P2PManager.init(allocator, .{}, false);
+    defer manager.stop();
+
+    const peer = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const other = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    try manager.establishSession(peer);
+
+    try manager.ensureRelaySender(peer);
+    try std.testing.expectError(error.InvalidPeerIdentity, manager.ensureRelaySender(other));
 }
