@@ -23,6 +23,18 @@ jobs:
       - name: Rust build
         run: cargo build --release --locked
 
+      - name: Install Rust audit tools
+        run: cargo install cargo-audit cargo-deny --locked
+
+      - name: Rust audit
+        run: cargo audit
+
+      - name: Rust dependency policy
+        run: cargo deny check
+
+      - name: Install script test
+        run: bash scripts/test-install.sh
+
   signal-server-quality:
     runs-on: ubuntu-latest
     steps:

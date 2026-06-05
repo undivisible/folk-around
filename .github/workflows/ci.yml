@@ -37,6 +37,21 @@ jobs:
         if: ${{ steps.rust-manifest.outputs.has_cargo == 'true' }}
         run: cargo build --release --locked
 
+      - name: Install Rust audit tools
+        if: ${{ steps.rust-manifest.outputs.has_cargo == 'true' }}
+        run: cargo install cargo-audit cargo-deny --locked
+
+      - name: Rust audit
+        if: ${{ steps.rust-manifest.outputs.has_cargo == 'true' }}
+        run: cargo audit
+
+      - name: Rust dependency policy
+        if: ${{ steps.rust-manifest.outputs.has_cargo == 'true' }}
+        run: cargo deny check
+
+      - name: Install script test
+        run: bash scripts/test-install.sh
+
   signal-server:
     runs-on: ubuntu-latest
     steps:

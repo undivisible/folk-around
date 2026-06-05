@@ -31,16 +31,32 @@ require_regex() {
 require_literal 'TMP_BIN="$(mktemp'
 require_literal 'trap '\''rm -f "$TMP_BIN" "$TMP_INSTALL"'\'' EXIT'
 require_regex 'curl -fsSL -o "\$TMP_BIN" "\$URL"'
+require_literal 'sha256_for_asset()'
+require_literal 'file_sha256()'
+require_literal 'Checksum mismatch for $ASSET'
+require_literal 'URL="https://github.com/$REPO/releases/download/$VERSION/$ASSET"'
 require_regex 'install -m 755 "\$TMP_BIN" "\$TMP_INSTALL"'
 require_regex 'sudo install -m 755 "\$TMP_BIN" "\$TMP_INSTALL"'
 require_regex 'mv -f "\$TMP_INSTALL" "\$BIN"'
 require_regex 'sudo mv -f "\$TMP_INSTALL" "\$BIN"'
 reject_literal 'curl -fsSL -o "$BIN" "$URL"'
+reject_literal 'releases/$VERSION/download'
 
 WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/folk-around-install-test.XXXXXX")"
 trap 'rm -rf "$WORK_DIR"' EXIT
 MOCK_BIN="$WORK_DIR/bin"
 mkdir -p "$MOCK_BIN"
+cat > "$MOCK_BIN/uname" <<'MOCK'
+#!/bin/bash
+set -euo pipefail
+case "$1" in
+  -s) printf '%s\n' Darwin ;;
+  -m) printf '%s\n' arm64 ;;
+  *) exit 1 ;;
+esac
+MOCK
+chmod +x "$MOCK_BIN/uname"
+
 cat > "$MOCK_BIN/curl" <<'MOCK'
 #!/bin/bash
 set -euo pipefail
@@ -59,6 +75,13 @@ done
 printf '#!/bin/sh\necho installed\n' > "$out"
 MOCK
 chmod +x "$MOCK_BIN/curl"
+
+cat > "$MOCK_BIN/shasum" <<'MOCK'
+#!/bin/bash
+set -euo pipefail
+printf '%s  %s\n' "690b0fff1e719bc47534d35e4ac62426f9138c599bca276171c640c830b29aa2" "${@: -1}"
+MOCK
+chmod +x "$MOCK_BIN/shasum"
 
 TARGET="$WORK_DIR/install/folk-around"
 mkdir -p "$(dirname "$TARGET")"

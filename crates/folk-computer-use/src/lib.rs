@@ -16,6 +16,10 @@ const SAFE_COMMANDS: &[&str] = &[
     "ls", "cat", "grep", "find", "head", "tail", "wc", "curl", "echo", "date", "whoami",
     "hostname", "uname", "which", "pwd", "ps", "uptime", "df", "du",
 ];
+const RESTRICTED_SHELL_CHARS: &[char] = &[
+    ';', '&', '|', '<', '>', '(', ')', '{', '}', '[', ']', '$', '`', '\\', '\'', '"', '*', '?',
+    '~', '\n', '\r',
+];
 
 #[derive(Debug, Error)]
 enum ToolExecError {
@@ -216,10 +220,13 @@ fn shell(args: Value, mode: AccessMode) -> Value {
     let result = (|| {
         let command = str_arg(&args, "command").ok_or(ToolExecError::Missing("command"))?;
         let cwd = str_arg(&args, "cwd");
-        if mode != AccessMode::Full && !is_safe_command(command) {
+        let output = if mode == AccessMode::Full {
+            run_shell(command, cwd)?
+        } else if let Some((program, args)) = restricted_command(command) {
+            run_command(program, &args, None, cwd)?
+        } else {
             return Ok(err_result("command blocked in this mode"));
-        }
-        let output = run_shell(command, cwd)?;
+        };
         Ok(text_result(format!(
             "stdout:\n{}\n\nstderr:\n{}\n\nexit: {}",
             output.stdout, output.stderr, output.status
@@ -505,9 +512,19 @@ fn flatten(result: Result<Value, ToolExecError>) -> Value {
     }
 }
 
-fn is_safe_command(command: &str) -> bool {
-    let first = command.split_whitespace().next().unwrap_or("");
-    SAFE_COMMANDS.contains(&first)
+fn restricted_command(command: &str) -> Option<(&str, Vec<&str>)> {
+    if command
+        .chars()
+        .any(|ch| RESTRICTED_SHELL_CHARS.contains(&ch))
+    {
+        return None;
+    }
+    let mut parts = command.split_whitespace();
+    let program = parts.next()?;
+    if !SAFE_COMMANDS.contains(&program) {
+        return None;
+    }
+    Some((program, parts.collect()))
 }
 
 fn str_arg<'a>(args: &'a Value, key: &str) -> Option<&'a str> {
@@ -575,6 +592,36 @@ mod tests {
     #[test]
     fn sandbox_shell_should_match_legacy_safe_command_behavior() {
         let mut table = ToolTable::new(AccessMode::Sandbox);
+        register_tools(&mut table);
+        let response = handle_message(
+            false,
+            &table,
+            json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"folk_shell","arguments":{"command":"echo hi"}}}),
+        )
+        .unwrap()
+        .unwrap();
+        assert!(response.contains("hi"));
+    }
+
+    #[test]
+    fn sandbox_shell_should_block_shell_metacharacters() {
+        let mut table = ToolTable::new(AccessMode::Sandbox);
+        register_tools(&mut table);
+        let response = handle_message(
+            false,
+            &table,
+            json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"folk_shell","arguments":{"command":"echo hi; uname -s"}}}),
+        )
+        .unwrap()
+        .unwrap();
+        assert!(response.contains("command blocked in this mode"));
+        assert!(!response.contains("Darwin"));
+        assert!(!response.contains("Linux"));
+    }
+
+    #[test]
+    fn limited_shell_should_execute_allowlisted_program_without_shell() {
+        let mut table = ToolTable::new(AccessMode::Limited);
         register_tools(&mut table);
         let response = handle_message(
             false,

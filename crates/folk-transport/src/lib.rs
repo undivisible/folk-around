@@ -1,6 +1,7 @@
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 use std::time::Duration;
 
@@ -18,6 +19,12 @@ use tungstenite::client::IntoClientRequest;
 use url::Url;
 
 const RELAY_AD: &[u8] = b"folk-around p2p relay v1";
+const MAX_HTTP_HEADER_BYTES: usize = 64 * 1024;
+const MAX_HTTP_BODY_BYTES: usize = 1024 * 1024;
+const MAX_SSE_CLIENTS: usize = 32;
+const HTTP_READ_TIMEOUT: Duration = Duration::from_secs(10);
+const HTTP_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
+static SSE_CLIENTS: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Debug, Error)]
 pub enum TransportError {
@@ -133,6 +140,8 @@ fn handle_http_client(
     verbose: bool,
     table: Arc<ToolTable>,
 ) -> Result<(), TransportError> {
+    stream.set_read_timeout(Some(HTTP_READ_TIMEOUT))?;
+    stream.set_write_timeout(Some(HTTP_WRITE_TIMEOUT))?;
     let mut buffer = Vec::new();
     let mut chunk = [0_u8; 4096];
     let mut expected_len = None;
@@ -145,13 +154,24 @@ fn handle_http_client(
         if expected_len.is_none()
             && let Some((offset, len)) = header_end(&buffer)
         {
-            expected_len = Some(offset + len + content_length(&buffer[..offset]));
+            let body_len = content_length(&buffer[..offset]);
+            if body_len > MAX_HTTP_BODY_BYTES {
+                send_response(
+                    &mut stream,
+                    413,
+                    "Payload Too Large",
+                    "text/plain",
+                    b"payload too large",
+                )?;
+                return Ok(());
+            }
+            expected_len = Some(offset + len + body_len);
         }
         if let Some(len) = expected_len {
             if buffer.len() >= len {
                 break;
             }
-        } else if buffer.len() > 64 * 1024 {
+        } else if buffer.len() > MAX_HTTP_HEADER_BYTES {
             send_response(
                 &mut stream,
                 400,
@@ -198,6 +218,16 @@ fn handle_http_post(
     };
     let body_start = offset + len;
     let body_len = content_length(&request[..offset]);
+    if body_len > MAX_HTTP_BODY_BYTES {
+        send_response(
+            &mut stream,
+            413,
+            "Payload Too Large",
+            "text/plain",
+            b"payload too large",
+        )?;
+        return Ok(());
+    }
     if body_len == 0 || body_start + body_len > request.len() {
         send_response(
             &mut stream,
@@ -229,6 +259,16 @@ fn handle_http_post(
 }
 
 fn send_sse(mut stream: TcpStream) -> Result<(), TransportError> {
+    let Some(_slot) = SseSlot::new() else {
+        send_response(
+            &mut stream,
+            503,
+            "Service Unavailable",
+            "text/plain",
+            b"too many sse clients",
+        )?;
+        return Ok(());
+    };
     stream.write_all(b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\naccess-control-allow-origin: *\r\naccess-control-allow-headers: content-type\r\naccess-control-allow-methods: GET, POST, OPTIONS\r\nconnection: keep-alive\r\n\r\n")?;
     stream.write_all(b"event: endpoint\ndata: /message\n\n")?;
     stream.flush()?;
@@ -258,6 +298,34 @@ fn send_response(
     stream.write_all(body)?;
     stream.flush()?;
     Ok(())
+}
+
+struct SseSlot;
+
+impl SseSlot {
+    fn new() -> Option<Self> {
+        let mut current = SSE_CLIENTS.load(Ordering::Relaxed);
+        loop {
+            if current >= MAX_SSE_CLIENTS {
+                return None;
+            }
+            match SSE_CLIENTS.compare_exchange_weak(
+                current,
+                current + 1,
+                Ordering::AcqRel,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return Some(Self),
+                Err(next) => current = next,
+            }
+        }
+    }
+}
+
+impl Drop for SseSlot {
+    fn drop(&mut self) {
+        SSE_CLIENTS.fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
 fn header_end(request: &[u8]) -> Option<(usize, usize)> {
@@ -620,5 +688,40 @@ mod tests {
         let mut reader = BufReader::new(br#"{"jsonrpc":"2.0"}"#.as_slice());
         let body = read_stdio_message(&mut reader).unwrap().unwrap();
         assert_eq!(body, br#"{"jsonrpc":"2.0"}"#);
+    }
+
+    #[test]
+    fn http_should_reject_oversized_body_before_reading_it() {
+        let table = Arc::new(ToolTable::new(folk_core::AccessMode::Full));
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            handle_http_client(stream, false, table).unwrap();
+        });
+
+        let mut client = TcpStream::connect(addr).unwrap();
+        write!(
+            client,
+            "POST /message HTTP/1.1\r\nhost: localhost\r\ncontent-length: {}\r\n\r\n",
+            MAX_HTTP_BODY_BYTES + 1
+        )
+        .unwrap();
+        client.flush().unwrap();
+        let mut response = String::new();
+        client.read_to_string(&mut response).unwrap();
+        server.join().unwrap();
+
+        assert!(response.starts_with("HTTP/1.1 413 Payload Too Large"));
+    }
+
+    #[test]
+    fn sse_slot_should_enforce_connection_limit() {
+        let slots = (0..MAX_SSE_CLIENTS)
+            .map(|_| SseSlot::new().unwrap())
+            .collect::<Vec<_>>();
+        assert!(SseSlot::new().is_none());
+        drop(slots);
+        assert!(SseSlot::new().is_some());
     }
 }
