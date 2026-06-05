@@ -6,6 +6,8 @@ use folk_core::{AccessMode, AppConfig, generate_pairing_code, load_config, save_
 use folk_mcp::ToolTable;
 use folk_transport::{run_http, run_stdio, start_p2p};
 
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+
 #[derive(Debug, Default)]
 struct Cli {
     verbose: bool,
@@ -16,6 +18,7 @@ struct Cli {
     p2p_requested: bool,
     stdio_requested: bool,
     help: bool,
+    version: bool,
 }
 
 fn main() {
@@ -29,6 +32,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let cli = parse_args();
     if cli.help {
         print_help();
+        return Ok(());
+    }
+    if cli.version {
+        println!("folk-around v{VERSION}");
         return Ok(());
     }
 
@@ -105,8 +112,16 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn parse_args() -> Cli {
+    parse_args_from(std::env::args().skip(1))
+}
+
+fn parse_args_from<I, S>(args: I) -> Cli
+where
+    I: IntoIterator<Item = S>,
+    S: Into<String>,
+{
     let mut cli = Cli::default();
-    let args = std::env::args().skip(1).collect::<Vec<_>>();
+    let args = args.into_iter().map(Into::into).collect::<Vec<_>>();
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -138,6 +153,7 @@ fn parse_args() -> Cli {
             "--p2p" => cli.p2p_requested = true,
             "--stdio" => cli.stdio_requested = true,
             "--help" | "-h" => cli.help = true,
+            "--version" | "-V" => cli.version = true,
             _ => {}
         }
         i += 1;
@@ -154,7 +170,7 @@ fn print_pairing_instructions(signal_url: &str, room: &str, port: u16) {
 
 fn print_help() {
     eprintln!(
-        r#"folk-around - MCP computer use daemon
+        r#"folk-around v{VERSION} - MCP computer use daemon
 Usage: folk-around [options]
 
   --verbose           Show tool calls
@@ -164,6 +180,7 @@ Usage: folk-around [options]
   --p2p               Join saved/default signaling server and expose local HTTP
   --signal-server <url>  Custom signaling server URL
   --room <name>       Pairing code / room name
+  --version           Print version
   --help              This help
 
 Transports:
@@ -173,4 +190,24 @@ Transports:
   --p2p     Prints a pairing code, registers with signaling, and starts local MCP
 "#
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn version_flag_should_parse() {
+        let cli = parse_args_from(["--version"]);
+
+        assert!(cli.version);
+        assert!(!cli.help);
+    }
+
+    #[test]
+    fn short_version_flag_should_parse() {
+        let cli = parse_args_from(["-V"]);
+
+        assert!(cli.version);
+    }
 }
