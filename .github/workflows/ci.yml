@@ -23,7 +23,7 @@ jobs:
 
       - name: Checkout equilibrium
         if: ${{ steps.rust-manifest.outputs.has_cargo == 'true' }}
-        run: git clone --depth 1 https://github.com/undivisible/equilibrium ../equilibrium
+        run: git clone --depth 1 https://github.com/tschk/equilibrium ../equilibrium
 
       - name: Install Zig
         if: ${{ steps.rust-manifest.outputs.has_cargo == 'true' }}
