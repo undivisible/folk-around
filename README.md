@@ -2,11 +2,11 @@
 
 https://folkaround.undivisible.dev
 
-Rust MCP agent for computer control. Shell, accessibility, clipboard, files, osascript - over stdio, HTTP SSE, or Cloudflare signaling plus local HTTP. The Zig daemon remains as a legacy compatibility module, and the native macOS menu bar app is still Zig/AppKit.
+Rust MCP agent for computer control. Shell, accessibility, clipboard, files, and `rs_peekaboo`-backed macOS automation over stdio, HTTP SSE, or Cloudflare signaling plus local HTTP. The Zig daemon remains as a legacy compatibility module, and the native macOS menu bar app is still Zig/AppKit.
 
 ## what it is
 
-Self-contained binary that speaks the [Model Context Protocol](https://modelcontextprotocol.io). Any MCP client (Claude Desktop, Cursor, any agent) connects and gets structured tools for observing and controlling a computer.
+Self-contained release binary that speaks the [Model Context Protocol](https://modelcontextprotocol.io). Any MCP client (Claude Desktop, Cursor, any agent) connects and gets structured tools for observing and controlling a computer.
 
 ```bash
 folk-around                              # reuse saved HTTP port, or stdio if none is saved
@@ -130,7 +130,7 @@ crates/
 ├── folk-core          config and access modes
 ├── folk-mcp           JSON-RPC MCP handling
 ├── folk-transport     stdio, HTTP SSE, and signaling relay
-├── folk-computer-use  shell, clipboard, and computer-use tools
+├── folk-computer-use  shell, clipboard, and rs_peekaboo-backed computer-use tools
 └── folk-zig-legacy    temporary Zig C ABI bridge through ../equilibrium
 src/
 ├── main.zig        legacy entry, cli args (--mode, --http, --p2p, --signal-server, --room)

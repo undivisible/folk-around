@@ -3,7 +3,7 @@
 ## identity
 
 rust mcp agent for computer control. speaks mcp over stdio, http sse, or Cloudflare signaling plus local http.
-self-contained binary, no external dependencies. zig remains the legacy daemon module and native macos menu bar app (appkit via @cimport).
+self-contained release binary. Rust source uses crates.io dependencies, including rs_peekaboo for computer-use. zig remains the legacy daemon module and native macos menu bar app (appkit via @cimport).
 
 ## build
 
@@ -35,7 +35,7 @@ crates/
 ├── folk-core          config and access modes
 ├── folk-mcp           JSON-RPC MCP handling
 ├── folk-transport     stdio, HTTP SSE, and signaling relay
-├── folk-computer-use  shell, clipboard, and computer-use tools
+├── folk-computer-use  shell, clipboard, and rs_peekaboo-backed computer-use tools
 └── folk-zig-legacy    temporary Zig C ABI bridge through ../equilibrium
 src/
 ├── main.zig        legacy entry, cli args (--mode, --http, --p2p, --signal-server, --room)

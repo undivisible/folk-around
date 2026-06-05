@@ -8,6 +8,6 @@ repository.workspace = true
 [dependencies]
 folk-core = { path = "../folk-core" }
 folk-mcp = { path = "../folk-mcp" }
+rs_peekaboo.workspace = true
 serde_json.workspace = true
-tempfile.workspace = true
 thiserror.workspace = true

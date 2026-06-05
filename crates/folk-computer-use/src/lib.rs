@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 use folk_core::AccessMode;
@@ -6,8 +7,9 @@ use folk_mcp::{
     ToolError, ToolTable, err_result, json_text_result, number_property, object_schema,
     string_property, text_result,
 };
+use rs_peekaboo::automation::Target;
+use rs_peekaboo::{Bounds, Direction, ImageMode, Peekaboo, Point};
 use serde_json::{Value, json};
-use tempfile::Builder;
 use thiserror::Error;
 
 const SAFE_COMMANDS: &[&str] = &[
@@ -21,10 +23,12 @@ enum ToolExecError {
     Missing(&'static str),
     #[error("{0}")]
     Io(#[from] std::io::Error),
-    #[error("unsupported platform: {0}")]
-    Unsupported(&'static str),
     #[error("action blocked in this mode")]
     Blocked,
+    #[error("{0}")]
+    Peekaboo(#[from] rs_peekaboo::PeekabooError),
+    #[error("{0}")]
+    Json(#[from] serde_json::Error),
 }
 
 pub fn register_tools(table: &mut ToolTable) {
@@ -258,77 +262,62 @@ fn spawn_command(args: Value, mode: AccessMode) -> Value {
 }
 
 fn clipboard_read() -> Value {
-    #[cfg(target_os = "macos")]
-    {
-        flatten(run_command("pbpaste", &[], None, None).map(|output| {
-            if output.stdout.is_empty() {
-                text_result("(empty)")
-            } else {
-                text_result(output.stdout)
-            }
-        }))
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        err_result("unsupported platform: clipboard read requires macOS")
-    }
+    flatten(
+        Peekaboo::new()
+            .clipboard_read()
+            .map(|text| {
+                if text.is_empty() {
+                    text_result("(empty)")
+                } else {
+                    text_result(text)
+                }
+            })
+            .map_err(ToolExecError::from),
+    )
 }
 
 fn clipboard_write(args: Value) -> Value {
-    #[cfg(target_os = "macos")]
-    {
-        let result = (|| {
-            let text = str_arg(&args, "text").ok_or(ToolExecError::Missing("text"))?;
-            run_command("pbcopy", &[], Some(text), None)?;
-            Ok(text_result("copied to clipboard"))
-        })();
-        flatten(result)
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = args;
-        err_result("unsupported platform: clipboard write requires macOS")
-    }
+    let result = (|| {
+        let text = str_arg(&args, "text").ok_or(ToolExecError::Missing("text"))?;
+        Peekaboo::new().clipboard_write(text)?;
+        Ok(text_result("copied to clipboard"))
+    })();
+    flatten(result)
 }
 
 fn screen_capture(args: Value, mode: AccessMode) -> Value {
     let result = (|| {
         ensure_observation(mode)?;
-        macos_only("screen capture")?;
-        let path = match str_arg(&args, "path") {
-            Some(path) => path.to_string(),
-            None => Builder::new()
-                .prefix("folk_screen_")
-                .suffix(".png")
-                .tempfile()?
-                .into_temp_path()
-                .keep()
-                .map_err(|err| err.error)?
-                .to_string_lossy()
-                .to_string(),
-        };
         let target = str_arg(&args, "target").unwrap_or("display");
-        let mut owned_args = vec!["-x".to_string()];
-        if target == "region" {
+        let path = str_arg(&args, "path").map(PathBuf::from);
+        let capture = if target == "region" {
             let x = int_arg(&args, "x").unwrap_or(0);
             let y = int_arg(&args, "y").unwrap_or(0);
             let width = int_arg(&args, "width").unwrap_or(0);
             let height = int_arg(&args, "height").unwrap_or(0);
             if width > 0 && height > 0 {
-                owned_args.push("-R".to_string());
-                owned_args.push(format!("{x},{y},{width},{height}"));
+                Peekaboo::new().image_region(
+                    Bounds {
+                        x,
+                        y,
+                        width,
+                        height,
+                    },
+                    path,
+                    true,
+                )?
+            } else {
+                Peekaboo::new().image(ImageMode::Screen, path, true)?
             }
         } else if target == "window" {
-            owned_args.push("-w".to_string());
-        }
-        owned_args.push(path.clone());
-        let borrowed = owned_args.iter().map(String::as_str).collect::<Vec<_>>();
-        run_command("screencapture", &borrowed, None, None)?;
-        let metadata = std::fs::metadata(&path)?;
+            Peekaboo::new().image(ImageMode::Window, path, true)?
+        } else {
+            Peekaboo::new().image(ImageMode::Screen, path, true)?
+        };
         Ok(json_text_result(&json!({
-            "path": path,
-            "mimeType": "image/png",
-            "bytes": metadata.len(),
+            "path": capture.path,
+            "mimeType": capture.mime_type,
+            "bytes": capture.bytes,
             "target": target
         })))
     })();
@@ -338,13 +327,7 @@ fn screen_capture(args: Value, mode: AccessMode) -> Value {
 fn ui_snapshot(mode: AccessMode) -> Value {
     let result = (|| {
         ensure_observation(mode)?;
-        macos_only("ui snapshot")?;
-        let output = run_command("osascript", &["-e", snapshot_script()], None, None)?;
-        let elements = output
-            .stdout
-            .lines()
-            .filter_map(parse_snapshot_line)
-            .collect::<Vec<_>>();
+        let elements = serde_json::to_value(Peekaboo::new().ui_elements(None)?)?;
         Ok(json_text_result(&json!({
             "platform": "macos",
             "elements": elements
@@ -353,85 +336,21 @@ fn ui_snapshot(mode: AccessMode) -> Value {
     flatten(result)
 }
 
-fn snapshot_script() -> &'static str {
-    r#"tell application "System Events"
-set out to ""
-repeat with p in (application processes whose background only is false)
-set appName to name of p
-set frontValue to frontmost of p as text
-set out to out & "app" & tab & appName & tab & frontValue & "\n"
-repeat with w in windows of p
-try
-set winName to name of w
-set posValue to position of w
-set sizeValue to size of w
-set minimizedValue to false
-try
-set minimizedValue to value of attribute "AXMinimized" of w
-end try
-set out to out & "window" & tab & appName & tab & winName & tab & (item 1 of posValue as text) & tab & (item 2 of posValue as text) & tab & (item 1 of sizeValue as text) & tab & (item 2 of sizeValue as text) & tab & (minimizedValue as text) & "\n"
-end try
-end repeat
-end repeat
-return out
-end tell"#
-}
-
-fn parse_snapshot_line(line: &str) -> Option<Value> {
-    let parts = line.split('\t').collect::<Vec<_>>();
-    match parts.as_slice() {
-        ["app", app, frontmost] => Some(json!({
-            "id": format!("app:{app}"),
-            "role": "application",
-            "label": app,
-            "app": app,
-            "window": null,
-            "bounds": null,
-            "state": {
-                "frontmost": frontmost.eq_ignore_ascii_case("true")
-            }
-        })),
-        ["window", app, title, x, y, width, height, minimized] => {
-            let x = x.parse::<i64>().ok()?;
-            let y = y.parse::<i64>().ok()?;
-            let width = width.parse::<i64>().ok()?;
-            let height = height.parse::<i64>().ok()?;
-            Some(json!({
-                "id": format!("window:{app}:{title}"),
-                "role": "window",
-                "label": title,
-                "app": app,
-                "window": title,
-                "bounds": {
-                    "x": x,
-                    "y": y,
-                    "width": width,
-                    "height": height
-                },
-                "state": {
-                    "minimized": minimized.eq_ignore_ascii_case("true")
-                }
-            }))
-        }
-        _ => None,
-    }
-}
-
 fn click(args: Value, mode: AccessMode) -> Value {
     let result = (|| {
         ensure_mutation(mode)?;
-        macos_only("click")?;
-        let (x, y) = if let Some(element_id) = str_arg(&args, "element_id") {
-            window_center(element_id)?
+        let target = if let Some(element_id) = str_arg(&args, "element_id") {
+            Target::Query {
+                query: element_id.to_string(),
+                snapshot: None,
+            }
         } else {
-            (
-                int_arg(&args, "x").ok_or(ToolExecError::Missing("x"))?,
-                int_arg(&args, "y").ok_or(ToolExecError::Missing("y"))?,
-            )
+            Target::Point(Point {
+                x: int_arg(&args, "x").ok_or(ToolExecError::Missing("x"))?,
+                y: int_arg(&args, "y").ok_or(ToolExecError::Missing("y"))?,
+            })
         };
-        run_osascript(&format!(
-            "tell application \"System Events\" to click at {{{x}, {y}}}"
-        ))?;
+        Peekaboo::new().click(target, "left", 1)?;
         Ok(text_result("clicked"))
     })();
     flatten(result)
@@ -440,12 +359,8 @@ fn click(args: Value, mode: AccessMode) -> Value {
 fn type_text(args: Value, mode: AccessMode) -> Value {
     let result = (|| {
         ensure_mutation(mode)?;
-        macos_only("type")?;
         let text = str_arg(&args, "text").ok_or(ToolExecError::Missing("text"))?;
-        run_osascript(&format!(
-            "tell application \"System Events\" to keystroke {}",
-            serde_json::to_string(text).map_err(|_| ToolExecError::Unsupported("type"))?
-        ))?;
+        Peekaboo::new().type_text(text, false, false, None)?;
         Ok(text_result("typed"))
     })();
     flatten(result)
@@ -454,31 +369,9 @@ fn type_text(args: Value, mode: AccessMode) -> Value {
 fn hotkey(args: Value, mode: AccessMode) -> Value {
     let result = (|| {
         ensure_mutation(mode)?;
-        macos_only("hotkey")?;
         let keys = str_arg(&args, "keys").ok_or(ToolExecError::Missing("keys"))?;
         let parts = keys.split('+').map(str::trim).collect::<Vec<_>>();
-        let Some(key) = parts.last() else {
-            return Err(ToolExecError::Missing("keys"));
-        };
-        let modifiers = parts[..parts.len().saturating_sub(1)]
-            .iter()
-            .filter_map(|part| match part.to_ascii_lowercase().as_str() {
-                "cmd" | "command" => Some("command down"),
-                "shift" => Some("shift down"),
-                "alt" | "option" => Some("option down"),
-                "ctrl" | "control" => Some("control down"),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        let script = if modifiers.is_empty() {
-            format!("tell application \"System Events\" to keystroke \"{key}\"")
-        } else {
-            format!(
-                "tell application \"System Events\" to keystroke \"{key}\" using {{{}}}",
-                modifiers.join(", ")
-            )
-        };
-        run_osascript(&script)?;
+        Peekaboo::new().hotkey(&parts)?;
         Ok(text_result("hotkey pressed"))
     })();
     flatten(result)
@@ -487,13 +380,24 @@ fn hotkey(args: Value, mode: AccessMode) -> Value {
 fn scroll(args: Value, mode: AccessMode) -> Value {
     let result = (|| {
         ensure_mutation(mode)?;
-        macos_only("scroll")?;
+        let dx = int_arg(&args, "dx").unwrap_or(0);
         let dy = int_arg(&args, "dy").unwrap_or(0);
-        let direction = if dy < 0 { "down" } else { "up" };
-        let amount = dy.unsigned_abs().max(1);
-        run_osascript(&format!(
-            "tell application \"System Events\" to scroll {direction} {amount}"
-        ))?;
+        let (direction, amount) = if dx != 0 {
+            let direction = if dx < 0 {
+                Direction::Left
+            } else {
+                Direction::Right
+            };
+            (direction, dx.unsigned_abs().max(1) as u32)
+        } else {
+            let direction = if dy < 0 {
+                Direction::Down
+            } else {
+                Direction::Up
+            };
+            (direction, dy.unsigned_abs().max(1) as u32)
+        };
+        Peekaboo::new().scroll(direction, amount)?;
         Ok(text_result("scrolled"))
     })();
     flatten(result)
@@ -506,27 +410,11 @@ fn window(args: Value, mode: AccessMode) -> Value {
     }
     let result = (|| {
         ensure_safe_focus_or_full(mode, action)?;
-        macos_only("window")?;
         let app = str_arg(&args, "app").ok_or(ToolExecError::Missing("app"))?;
         match action {
-            "focus" => run_osascript(&format!("tell application \"{app}\" to activate"))?,
-            "close" => run_osascript(&format!("tell application \"{app}\" to close front window"))?,
-            "minimize" => run_osascript(&format!(
-                "tell application \"System Events\" to tell process \"{app}\" to set value of attribute \"AXMinimized\" of front window to true"
-            ))?,
-            "move" => {
-                let x = int_arg(&args, "x").ok_or(ToolExecError::Missing("x"))?;
-                let y = int_arg(&args, "y").ok_or(ToolExecError::Missing("y"))?;
-                run_osascript(&format!(
-                    "tell application \"System Events\" to tell process \"{app}\" to set position of front window to {{{x}, {y}}}"
-                ))?
-            }
-            "resize" => {
-                let width = int_arg(&args, "width").ok_or(ToolExecError::Missing("width"))?;
-                let height = int_arg(&args, "height").ok_or(ToolExecError::Missing("height"))?;
-                run_osascript(&format!(
-                    "tell application \"System Events\" to tell process \"{app}\" to set size of front window to {{{width}, {height}}}"
-                ))?
+            "focus" | "close" | "minimize" => Peekaboo::new().window(action, Some(app), None)?,
+            "move" | "resize" => {
+                Peekaboo::new().window(action, Some(app), Some(window_bounds(action, &args)?))?
             }
             _ => return Err(ToolExecError::Missing("action")),
         };
@@ -535,39 +423,22 @@ fn window(args: Value, mode: AccessMode) -> Value {
     flatten(result)
 }
 
-fn window_center(element_id: &str) -> Result<(i64, i64), ToolExecError> {
-    let Some(rest) = element_id.strip_prefix("window:") else {
-        return Err(ToolExecError::Missing("x"));
-    };
-    let Some((app, title)) = rest.split_once(':') else {
-        return Err(ToolExecError::Missing("x"));
-    };
-    let script = format!(
-        r#"tell application "System Events"
-tell process "{app}"
-repeat with w in windows
-if name of w is "{title}" then
-set posValue to position of w
-set sizeValue to size of w
-return ((item 1 of posValue) + ((item 1 of sizeValue) div 2) as text) & "," & ((item 2 of posValue) + ((item 2 of sizeValue) div 2) as text)
-end if
-end repeat
-end tell
-end tell"#
-    );
-    let output = run_osascript(&script)?;
-    let Some((x, y)) = output.stdout.trim().split_once(',') else {
-        return Err(ToolExecError::Missing("x"));
-    };
-    let x = x
-        .trim()
-        .parse::<i64>()
-        .map_err(|_| ToolExecError::Missing("x"))?;
-    let y = y
-        .trim()
-        .parse::<i64>()
-        .map_err(|_| ToolExecError::Missing("y"))?;
-    Ok((x, y))
+fn window_bounds(action: &str, args: &Value) -> Result<Bounds, ToolExecError> {
+    match action {
+        "move" => Ok(Bounds {
+            x: int_arg(args, "x").ok_or(ToolExecError::Missing("x"))?,
+            y: int_arg(args, "y").ok_or(ToolExecError::Missing("y"))?,
+            width: 0,
+            height: 0,
+        }),
+        "resize" => Ok(Bounds {
+            x: 0,
+            y: 0,
+            width: int_arg(args, "width").ok_or(ToolExecError::Missing("width"))?,
+            height: int_arg(args, "height").ok_or(ToolExecError::Missing("height"))?,
+        }),
+        _ => Err(ToolExecError::Missing("action")),
+    }
 }
 
 fn app(args: Value, mode: AccessMode) -> Value {
@@ -577,14 +448,10 @@ fn app(args: Value, mode: AccessMode) -> Value {
     }
     let result = (|| {
         ensure_safe_focus_or_full(mode, action)?;
-        macos_only("app")?;
         let app = str_arg(&args, "app").ok_or(ToolExecError::Missing("app"))?;
         match action {
-            "launch" | "activate" => run_command("open", &["-a", app], None, None)?,
-            "quit" => {
-                ensure_mutation(mode)?;
-                run_osascript(&format!("tell application \"{app}\" to quit"))?
-            }
+            "launch" | "activate" => Peekaboo::new().app(action, Some(app))?,
+            "quit" => Peekaboo::new().app(action, Some(app))?,
             _ => return Err(ToolExecError::Missing("action")),
         };
         Ok(text_result("app action complete"))
@@ -594,31 +461,21 @@ fn app(args: Value, mode: AccessMode) -> Value {
 
 fn menu(args: Value, mode: AccessMode) -> Value {
     let result = (|| {
-        macos_only("menu")?;
         let action = str_arg(&args, "action").ok_or(ToolExecError::Missing("action"))?;
         let app = str_arg(&args, "app").ok_or(ToolExecError::Missing("app"))?;
         if action == "inspect" {
             ensure_observation(mode)?;
-            let script = format!(
-                "tell application \"System Events\" to tell process \"{app}\" to get name of menu bar items of menu bar 1"
-            );
-            let output = run_osascript(&script)?;
-            return Ok(text_result(output.stdout));
+            return Ok(json_text_result(
+                &Peekaboo::new().menu("list", app, None, None)?,
+            ));
         }
         ensure_mutation(mode)?;
         let menu = str_arg(&args, "menu").ok_or(ToolExecError::Missing("menu"))?;
         let item = str_arg(&args, "item").ok_or(ToolExecError::Missing("item"))?;
-        let script = format!(
-            "tell application \"System Events\" to tell process \"{app}\" to click menu item \"{item}\" of menu \"{menu}\" of menu bar item \"{menu}\" of menu bar 1"
-        );
-        run_osascript(&script)?;
+        Peekaboo::new().menu("click", app, Some(menu), Some(item))?;
         Ok(text_result("menu action complete"))
     })();
     flatten(result)
-}
-
-fn run_osascript(script: &str) -> Result<CommandOutput, ToolExecError> {
-    run_command("osascript", &["-e", script], None, None)
 }
 
 fn ensure_observation(_mode: AccessMode) -> Result<(), ToolExecError> {
@@ -626,7 +483,7 @@ fn ensure_observation(_mode: AccessMode) -> Result<(), ToolExecError> {
 }
 
 fn ensure_mutation(mode: AccessMode) -> Result<(), ToolExecError> {
-    if mode == AccessMode::Sandbox {
+    if mode != AccessMode::Full {
         Err(ToolExecError::Blocked)
     } else {
         Ok(())
@@ -634,18 +491,10 @@ fn ensure_mutation(mode: AccessMode) -> Result<(), ToolExecError> {
 }
 
 fn ensure_safe_focus_or_full(mode: AccessMode, action: &str) -> Result<(), ToolExecError> {
-    if matches!(action, "list" | "focus" | "activate" | "launch") {
+    if matches!(action, "list" | "focus" | "activate") {
         Ok(())
     } else {
         ensure_mutation(mode)
-    }
-}
-
-fn macos_only(action: &'static str) -> Result<(), ToolExecError> {
-    if cfg!(target_os = "macos") {
-        Ok(())
-    } else {
-        Err(ToolExecError::Unsupported(action))
     }
 }
 
@@ -749,5 +598,25 @@ mod tests {
         .unwrap()
         .unwrap();
         assert!(response.contains("action blocked in this mode"));
+    }
+
+    #[test]
+    fn limited_mutation_should_be_blocked_for_computer_use() {
+        let mut table = ToolTable::new(AccessMode::Limited);
+        register_tools(&mut table);
+        let response = handle_message(
+            false,
+            &table,
+            json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"folk_type","arguments":{"text":"hi"}}}),
+        )
+        .unwrap()
+        .unwrap();
+        assert!(response.contains("action blocked in this mode"));
+    }
+
+    #[test]
+    fn limited_launch_should_be_blocked() {
+        assert!(ensure_safe_focus_or_full(AccessMode::Limited, "launch").is_err());
+        assert!(ensure_safe_focus_or_full(AccessMode::Limited, "activate").is_ok());
     }
 }
