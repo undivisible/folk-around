@@ -79,7 +79,7 @@ chmod +x "$MOCK_BIN/curl"
 cat > "$MOCK_BIN/shasum" <<'MOCK'
 #!/bin/bash
 set -euo pipefail
-printf '%s  %s\n' "690b0fff1e719bc47534d35e4ac62426f9138c599bca276171c640c830b29aa2" "${@: -1}"
+printf '%s  %s\n' "1915ae43fd8f67856e39b57f6f78006e14a08b3d8068a41df9f0f62ab4fb7171" "${@: -1}"
 MOCK
 chmod +x "$MOCK_BIN/shasum"
 
