@@ -21,16 +21,6 @@ jobs:
             echo "has_cargo=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Checkout equilibrium
-        if: ${{ steps.rust-manifest.outputs.has_cargo == 'true' }}
-        run: git clone --depth 1 https://github.com/tschk/equilibrium ../equilibrium
-
-      - name: Install Zig
-        if: ${{ steps.rust-manifest.outputs.has_cargo == 'true' }}
-        uses: mlugg/setup-zig@v2.2.1
-        with:
-          version: 0.16.0
-
       - name: Rust format
         if: ${{ steps.rust-manifest.outputs.has_cargo == 'true' }}
         run: cargo fmt --all -- --check
@@ -46,28 +36,6 @@ jobs:
       - name: Rust build
         if: ${{ steps.rust-manifest.outputs.has_cargo == 'true' }}
         run: cargo build --release
-
-  build-macos:
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v6.0.3
-
-      - name: Install Zig
-        uses: mlugg/setup-zig@v2.2.1
-        with:
-          version: 0.16.0
-
-      - name: Check Zig format
-        run: zig fmt --check build.zig src/*.zig
-
-      - name: Build CLI
-        run: zig build -Doptimize=ReleaseFast
-
-      - name: Build App
-        run: zig build -Dapp -Doptimize=ReleaseFast
-
-      - name: Run tests
-        run: zig build test
 
   signal-server:
     runs-on: ubuntu-latest

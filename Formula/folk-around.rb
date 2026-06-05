@@ -2,7 +2,7 @@
 # frozen_string_literal: true
 
 class FolkAround < Formula
-  desc "Zig MCP agent for computer control"
+  desc "Rust MCP agent for computer control"
   homepage "https://folkaround.undivisible.dev"
   license "MPL-2.0"
   version "0.2.0"

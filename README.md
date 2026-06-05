@@ -2,7 +2,7 @@
 
 https://folkaround.undivisible.dev
 
-Rust MCP agent for computer control. Shell, accessibility, clipboard, files, and `rs_peekaboo`-backed macOS automation over stdio, HTTP SSE, or Cloudflare signaling plus local HTTP. The Zig daemon remains as a legacy compatibility module, and the native macOS menu bar app is still Zig/AppKit.
+Rust MCP agent for computer control. Shell, accessibility, clipboard, files, and `rs_peekaboo`-backed macOS automation over stdio, HTTP SSE, or Cloudflare signaling plus local HTTP.
 
 ## what it is
 
@@ -72,20 +72,6 @@ The tools exposed through MCP always act on the computer running `folk-around`. 
 
 The last signaling server, pairing code, HTTP port, and mode are saved under `~/.config/folk-around/config`. Running `folk-around` with no transport flags reuses the saved HTTP port if one exists. Running `folk-around --p2p` reuses the last saved signaling server and pairing code unless you pass `--signal-server` or `--room <code>`.
 
-## macOS menu bar app and Zig legacy module
-
-The main CLI runtime is Rust after the migration. The Zig tree remains buildable for the legacy daemon module and for the menu bar companion, which uses the Objective-C runtime directly. No Swift, no Xcode project required.
-
-```bash
-# build it
-zig build -Dapp   # outputs FolkAround in zig-out/bin/
-
-# or build both
-zig build all
-```
-
-Shows daemon status, start/stop daemon, run app at login, and run daemon at login.
-
 ## install
 
 ```bash
@@ -97,12 +83,6 @@ git clone https://github.com/undivisible/folk-around
 cd folk-around
 cargo build --release
 sudo cp target/release/folk-around /usr/local/bin/
-```
-
-Legacy Zig compatibility build:
-```bash
-zig build -Doptimize=ReleaseFast
-sudo cp zig-out/bin/folk-around /usr/local/bin/
 ```
 
 ## security modes
@@ -130,10 +110,9 @@ crates/
 ├── folk-core          config and access modes
 ├── folk-mcp           JSON-RPC MCP handling
 ├── folk-transport     stdio, HTTP SSE, and signaling relay
-├── folk-computer-use  shell, clipboard, and rs_peekaboo-backed computer-use tools
-└── folk-zig-legacy    temporary Zig C ABI bridge through ../equilibrium
+└── folk-computer-use  shell, clipboard, and rs_peekaboo-backed computer-use tools
 src/
-├── main.zig        legacy entry, cli args (--mode, --http, --p2p, --signal-server, --room)
+├── main.zig        archived legacy entry, cli args (--mode, --http, --p2p, --signal-server, --room)
 ├── mcp.zig         legacy stdio MCP transport
 ├── http.zig        legacy HTTP SSE transport
 ├── p2p.zig         legacy relay wire protocol + CF signaling client
@@ -150,6 +129,8 @@ scripts/
 ├── install.sh      one-liner installer
 └── folk-around.1   man page
 ```
+
+The Zig files under `src/` and `build.zig` are retained as archived legacy source. They are not part of the active Cargo workspace, CI, release assets, or install path.
 
 ## license
 

@@ -62,7 +62,6 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut table = ToolTable::new(mode);
     register_tools(&mut table);
-    let _legacy = folk_zig_legacy::LegacyBridge::init().ok();
     let table = Arc::new(table);
 
     if let Some(url) = signal_url {

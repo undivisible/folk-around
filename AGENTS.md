@@ -3,7 +3,7 @@
 ## identity
 
 rust mcp agent for computer control. speaks mcp over stdio, http sse, or Cloudflare signaling plus local http.
-self-contained release binary. Rust source uses crates.io dependencies, including rs_peekaboo for computer-use. zig remains the legacy daemon module and native macos menu bar app (appkit via @cimport).
+self-contained release binary. Rust source uses crates.io dependencies, including rs_peekaboo for computer-use.
 
 ## build
 
@@ -13,13 +13,6 @@ cargo fmt --all -- --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all-features
 cargo build --release
-
-requires zig 0.16.0 for the legacy module and mac app
-zig fmt --check build.zig src/*.zig
-zig build                 # legacy daemon only (zig-out/bin/folk-around)
-zig build -Dapp           # mac app only (zig-out/bin/FolkAround)
-zig build all             # legacy daemon + mac app
-zig build -Doptimize=ReleaseFast  # legacy release build
 ```
 
 ## source layout
@@ -35,10 +28,9 @@ crates/
 ├── folk-core          config and access modes
 ├── folk-mcp           JSON-RPC MCP handling
 ├── folk-transport     stdio, HTTP SSE, and signaling relay
-├── folk-computer-use  shell, clipboard, and rs_peekaboo-backed computer-use tools
-└── folk-zig-legacy    temporary Zig C ABI bridge through ../equilibrium
+└── folk-computer-use  shell, clipboard, and rs_peekaboo-backed computer-use tools
 src/
-├── main.zig        legacy entry, cli args (--mode, --http, --p2p, --signal-server, --room)
+├── main.zig        archived legacy entry, cli args (--mode, --http, --p2p, --signal-server, --room)
 ├── mcp.zig         legacy stdio mcp transport (init, tools/list, tools/call, ping, notifications)
 ├── http.zig        legacy http sse transport (GET /sse, POST /message, GET /health)
 ├── p2p.zig         legacy Cloudflare Workers signaling client, WebSocket join, frame helpers
@@ -89,10 +81,7 @@ The worker creates Durable Objects per room. WebSocket-based signaling:
 
 ## development notes
 
-- zig 0.16 api only. 0.15+ has breaking std changes from older releases.
-- no package manager. all deps inline.
-- macos target primary (osascript, screencapture, pbcopy/pbpaste, appkit).
-- mac_app.zig uses cached Objective-C runtime calls with Cocoa/ApplicationServices frameworks.
+- Zig files under src/ and build.zig are archived legacy source only. They are not active CI, release, install, or Cargo workspace paths.
 - p2p signaling is wired; encrypted MCP relay payloads use X25519 shared-secret-derived keys over the signaling relay.
 - signal-server fully functional: deploy for signaling; use --http for the local MCP endpoint.
-- linux fallback possible via xdotool/etc (no menu bar app).
+- macos target primary through rs_peekaboo-backed Rust computer-use tools.

@@ -6,25 +6,7 @@ on:
       - 'v*'
 
 jobs:
-  detect:
-    runs-on: ubuntu-latest
-    outputs:
-      has_cargo: ${{ steps.rust-manifest.outputs.has_cargo }}
-    steps:
-      - uses: actions/checkout@v6.0.3
-
-      - name: Detect Rust manifest
-        id: rust-manifest
-        run: |
-          if [ -f Cargo.toml ]; then
-            echo "has_cargo=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "has_cargo=false" >> "$GITHUB_OUTPUT"
-          fi
-
   rust-cli:
-    needs: detect
-    if: ${{ needs.detect.outputs.has_cargo == 'true' }}
     strategy:
       fail-fast: false
       matrix:
@@ -45,14 +27,6 @@ jobs:
     steps:
       - uses: actions/checkout@v6.0.3
 
-      - name: Checkout equilibrium
-        run: git clone --depth 1 https://github.com/tschk/equilibrium ../equilibrium
-
-      - name: Install Zig
-        uses: mlugg/setup-zig@v2.2.1
-        with:
-          version: 0.16.0
-
       - name: Add Rust target
         run: rustup target add ${{ matrix.target }}
 
@@ -70,67 +44,9 @@ jobs:
           name: ${{ matrix.asset }}
           path: dist/${{ matrix.asset }}
 
-  zig-cli:
-    needs: detect
-    if: ${{ needs.detect.outputs.has_cargo != 'true' }}
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v6.0.3
-
-      - name: Install Zig
-        uses: mlugg/setup-zig@v2.2.1
-        with:
-          version: 0.16.0
-
-      - name: Build Zig CLI assets
-        run: |
-          mkdir -p dist
-          zig build -Dtarget=aarch64-macos -Doptimize=ReleaseFast
-          cp zig-out/bin/folk-around dist/folk-around-darwin-aarch64
-          zig build -Dtarget=x86_64-macos -Doptimize=ReleaseFast
-          cp zig-out/bin/folk-around dist/folk-around-darwin-x86_64
-          zig build -Dtarget=aarch64-linux -Doptimize=ReleaseFast
-          cp zig-out/bin/folk-around dist/folk-around-linux-aarch64
-          zig build -Dtarget=x86_64-linux -Doptimize=ReleaseFast
-          cp zig-out/bin/folk-around dist/folk-around-linux-x86_64
-
-      - name: Upload Zig CLI
-        uses: actions/upload-artifact@v4
-        with:
-          name: zig-cli
-          path: |
-            dist/folk-around-darwin-aarch64
-            dist/folk-around-darwin-x86_64
-            dist/folk-around-linux-aarch64
-            dist/folk-around-linux-x86_64
-
-  zig-app:
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v6.0.3
-
-      - name: Install Zig
-        uses: mlugg/setup-zig@v2.2.1
-        with:
-          version: 0.16.0
-
-      - name: Build Zig app
-        run: |
-          mkdir -p dist
-          zig build -Dapp -Doptimize=ReleaseFast
-          cp zig-out/bin/FolkAround dist/FolkAround-darwin
-
-      - name: Upload Zig app
-        uses: actions/upload-artifact@v4
-        with:
-          name: FolkAround-darwin
-          path: dist/FolkAround-darwin
-
   release:
     needs:
       - rust-cli
-      - zig-cli
-      - zig-app
     if: ${{ always() && !cancelled() && !failure() }}
     runs-on: ubuntu-latest
     permissions:
@@ -150,5 +66,4 @@ jobs:
             dist/folk-around-darwin-x86_64
             dist/folk-around-linux-aarch64
             dist/folk-around-linux-x86_64
-            dist/FolkAround-darwin
           tag_name: ${{ github.ref_name }}

@@ -14,5 +14,4 @@ folk-computer-use = { path = "../folk-computer-use" }
 folk-core = { path = "../folk-core" }
 folk-mcp = { path = "../folk-mcp" }
 folk-transport = { path = "../folk-transport" }
-folk-zig-legacy = { path = "../folk-zig-legacy" }
 serde_json.workspace = true

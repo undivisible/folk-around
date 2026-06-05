@@ -5,7 +5,6 @@ members = [
     "crates/folk-core",
     "crates/folk-mcp",
     "crates/folk-transport",
-    "crates/folk-zig-legacy",
 ]
 resolver = "3"
 
@@ -16,9 +15,7 @@ repository = "https://github.com/undivisible/folk-around"
 
 [workspace.dependencies]
 base64 = "0.22"
-cc = "1.2"
 chacha20poly1305 = "0.10"
-equilibrium-ffi = { path = "../equilibrium" }
 hex = "0.4"
 hkdf = "0.12"
 rand = "0.9"
