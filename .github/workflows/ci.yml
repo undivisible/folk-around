@@ -21,6 +21,10 @@ jobs:
             echo "has_cargo=false" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Checkout equilibrium
+        if: ${{ steps.rust-manifest.outputs.has_cargo == 'true' }}
+        run: git clone --depth 1 https://github.com/undivisible/equilibrium ../equilibrium
+
       - name: Install Zig
         if: ${{ steps.rust-manifest.outputs.has_cargo == 'true' }}
         uses: mlugg/setup-zig@v2.2.1

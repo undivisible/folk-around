@@ -45,6 +45,9 @@ jobs:
     steps:
       - uses: actions/checkout@v6.0.3
 
+      - name: Checkout equilibrium
+        run: git clone --depth 1 https://github.com/undivisible/equilibrium ../equilibrium
+
       - name: Install Zig
         uses: mlugg/setup-zig@v2.2.1
         with:
