@@ -1,3 +1,16 @@
-* linguist-vendored
-*.zig linguist-vendored=false linguist-language=Zig
-*.ts linguist-vendored=false linguist-language=TypeScript
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.pdf binary
+*.gz binary
+*.zip binary
+
+src/** linguist-vendored
+build.zig linguist-vendored
+signal-server/dist/** linguist-generated
+zig-out/** linguist-generated
