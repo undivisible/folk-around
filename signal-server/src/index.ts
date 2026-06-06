@@ -4,23 +4,22 @@
 /// Architecture:
 ///   Client connects via WebSocket to /signal/:room
 ///   Durable Object per room tracks connected peers
-///   Peers exchange identity keys and connection metadata through the room
-///   Once both peers have each other's info, they connect directly
-///   (or fall back to relay through the signaling server if NAT punch fails)
+///   Peers exchange X25519 identities through the room
+///   MCP relay payloads are end-to-end encrypted by the peers and forwarded through the signaling server
 ///
 /// Protocol (JSON messages over WebSocket):
 ///   Client -> Server:
-///     { type: "join", identity: "<ed25519-pubkey-hex>" }
-///     { type: "offer", to: "<peer-identity>", data: { host, port, key } }
-///     { type: "answer", to: "<peer-identity>", data: { host, port, key } }
+///     { type: "join", identity: "<x25519-pubkey-hex>" }
+///     { type: "offer", from: "<peer-identity>", to: "<peer-identity>", data: { type: "mcp_relay" } }
+///     { type: "answer", from: "<peer-identity>", to: "<peer-identity>", data: { type: "mcp_relay", accepted: true } }
 ///     { type: "relay", to: "<peer-identity>", data: <encrypted-bytes> }
 ///
 ///   Server -> Client:
 ///     { type: "joined", room: "<room>", peers: ["<identity>", ...] }
-///     { type: "peer_joined", identity: "<ed25519-pubkey-hex>" }
-///     { type: "peer_left", identity: "<ed25519-pubkey-hex>" }
-///     { type: "offer", from: "<identity>", data: { host, port, key } }
-///     { type: "answer", from: "<identity>", data: { host, port, key } }
+///     { type: "peer_joined", identity: "<x25519-pubkey-hex>" }
+///     { type: "peer_left", identity: "<x25519-pubkey-hex>" }
+///     { type: "offer", from: "<identity>", data: { type: "mcp_relay" } }
+///     { type: "answer", from: "<identity>", data: { type: "mcp_relay", accepted: true } }
 ///     { type: "relay", from: "<identity>", data: <encrypted-bytes> }
 
 export interface Env {
