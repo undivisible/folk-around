@@ -57,7 +57,7 @@ pub fn run_stdio(verbose: bool, table: Arc<ToolTable>) -> Result<(), TransportEr
             Ok(msg) => msg,
             Err(err) => {
                 if verbose {
-                    eprintln!("[folk] json error: {err}");
+                    log_status(&format!("json error: {err}"));
                 }
                 continue;
             }
@@ -73,7 +73,7 @@ pub fn run_stdio(verbose: bool, table: Arc<ToolTable>) -> Result<(), TransportEr
 pub fn run_http(verbose: bool, table: Arc<ToolTable>, port: u16) -> Result<(), TransportError> {
     let listener = TcpListener::bind(http_bind_addr(port))?;
     if verbose {
-        eprintln!("[folk] HTTP listening on http://127.0.0.1:{port}/");
+        log_status(&format!("HTTP listening on http://127.0.0.1:{port}/"));
     }
     for stream in listener.incoming() {
         let table = Arc::clone(&table);
@@ -83,7 +83,7 @@ pub fn run_http(verbose: bool, table: Arc<ToolTable>, port: u16) -> Result<(), T
                     let _ = handle_http_client(stream, verbose, table);
                 });
             }
-            Err(err) if verbose => eprintln!("[folk] HTTP accept error: {err}"),
+            Err(err) if verbose => log_status(&format!("HTTP accept error: {err}")),
             Err(_) => {}
         }
     }
@@ -98,7 +98,7 @@ pub fn start_p2p(verbose: bool, table: Arc<ToolTable>, signal_url: String, room:
             if let Err(err) = manager.join_signal_room()
                 && manager.verbose
             {
-                eprintln!("[folk] signaling error: {err}");
+                log_status(&format!("signaling error: {err}"));
             }
             thread::sleep(Duration::from_secs(2));
         }
@@ -385,7 +385,7 @@ impl P2PManager {
     fn join_signal_room(&mut self) -> Result<(), TransportError> {
         let ws_url = signal_websocket_url(&self.signal_url, &self.room)?;
         if self.verbose {
-            eprintln!("[folk] signaling websocket: {ws_url}");
+            log_status(&format!("signaling websocket: {ws_url}"));
         }
         let mut request = ws_url.as_str().into_client_request()?;
         let mut nonce = [0_u8; 16];
@@ -403,7 +403,7 @@ impl P2PManager {
                 .into(),
         ))?;
         if self.verbose {
-            eprintln!("[folk] signaling join sent");
+            log_status("signaling join sent");
         }
         while let Ok(message) = socket.read() {
             match message {
@@ -427,7 +427,7 @@ impl P2PManager {
         raw: &str,
     ) -> Result<(), TransportError> {
         if self.verbose {
-            eprintln!("[folk] signaling recv: {raw}");
+            log_status(&format!("signaling recv: {raw}"));
         }
         let parsed: Value = serde_json::from_str(raw)?;
         let msg_type = parsed.get("type").and_then(Value::as_str).unwrap_or("");
@@ -474,7 +474,7 @@ impl P2PManager {
                 .into(),
         ))?;
         if self.verbose {
-            eprintln!("[folk] sent offer to {peer}");
+            log_status(&format!("sent offer to {peer}"));
         }
         Ok(())
     }
@@ -487,7 +487,7 @@ impl P2PManager {
         let from = hex::encode(self.identity_public);
         socket.send(Message::Text(json!({"type":"answer","from":from,"to":peer,"data":{"type":"mcp_relay","accepted":true}}).to_string().into()))?;
         if self.verbose {
-            eprintln!("[folk] sent answer to {peer}");
+            log_status(&format!("sent answer to {peer}"));
         }
         Ok(())
     }
@@ -506,7 +506,7 @@ impl P2PManager {
             .ok_or(TransportError::InvalidEncryptedPayload)?;
         self.ensure_relay_sender(from)?;
         if self.verbose {
-            eprintln!("[folk] relay from {from}");
+            log_status(&format!("relay from {from}"));
         }
         let mcp_json = self.decrypt_relay_data(data)?;
         let msg: Value = serde_json::from_str(&mcp_json)?;
@@ -601,6 +601,22 @@ impl P2PManager {
             _ => Err(TransportError::InvalidPeerIdentity),
         }
     }
+}
+
+fn log_status(message: &str) {
+    let now = terminal_time();
+    eprintln!("[{now}] {message}");
+}
+
+fn terminal_time() -> String {
+    let seconds = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs() % 86_400)
+        .unwrap_or(0);
+    let hour = seconds / 3_600;
+    let minute = (seconds % 3_600) / 60;
+    let second = seconds % 60;
+    format!("{hour:02}:{minute:02}:{second:02}")
 }
 
 fn http_bind_addr(port: u16) -> (&'static str, u16) {

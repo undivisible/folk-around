@@ -141,7 +141,7 @@ pub fn handle_message(
     let is_notification = id.as_ref().is_none_or(Value::is_null);
 
     if verbose {
-        eprintln!("[folk] <- {method}");
+        log_status(&format!("<- {method}"));
     }
 
     match method.as_str() {
@@ -206,11 +206,11 @@ pub fn handle_message(
                 .cloned()
                 .unwrap_or_else(|| json!({}));
             if verbose {
-                eprintln!("[folk] tool call: {name} {arguments}");
+                log_status(&format!("tool call: {name} {arguments}"));
             }
             let result = table.call(name, arguments);
             if verbose {
-                eprintln!("[folk] tool result: {name} {result}");
+                log_status(&format!("tool result: {name} {result}"));
             }
             json_response(id, result).map(Some)
         }
@@ -222,6 +222,22 @@ pub fn handle_message(
             }
         }
     }
+}
+
+fn log_status(message: &str) {
+    let now = terminal_time();
+    eprintln!("[{now}] {message}");
+}
+
+fn terminal_time() -> String {
+    let seconds = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs() % 86_400)
+        .unwrap_or(0);
+    let hour = seconds / 3_600;
+    let minute = (seconds % 3_600) / 60;
+    let second = seconds % 60;
+    format!("{hour:02}:{minute:02}:{second:02}")
 }
 
 fn json_response(id: Value, result: Value) -> Result<String, serde_json::Error> {

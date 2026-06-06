@@ -23,7 +23,7 @@ struct Cli {
 
 fn main() {
     if let Err(err) = run() {
-        eprintln!("{err}");
+        log_status(&err.to_string());
         process::exit(1);
     }
 }
@@ -63,7 +63,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let Some(mode) = AccessMode::parse(&mode_name) else {
-        eprintln!("invalid mode. use: full, limited, sandbox");
+        log_status("invalid mode. use: full, limited, sandbox");
         process::exit(1);
     };
 
@@ -84,7 +84,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             mode: Some(mode_name),
         })?;
         if cli.verbose {
-            eprintln!("[folk] P2P mode, signaling: {url}");
+            log_status(&format!("P2P mode, signaling: {url}"));
         }
         start_p2p(cli.verbose, Arc::clone(&table), url.clone(), room.clone());
         print_pairing_instructions(&url, &room, port);
@@ -97,14 +97,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             mode: Some(mode_name),
         })?;
         if cli.verbose {
-            eprintln!("[folk] HTTP SSE mode on port {port}");
+            log_status(&format!("HTTP SSE mode on port {port}"));
         } else {
-            eprintln!("[folk] HTTP listening on http://127.0.0.1:{port}/");
+            log_status(&format!("HTTP listening on http://127.0.0.1:{port}/"));
         }
         run_http(cli.verbose, table, port)?;
     } else {
         if cli.verbose {
-            eprintln!("[folk] stdio mode (mode={})", mode.as_str());
+            log_status(&format!("stdio mode (mode={})", mode.as_str()));
         }
         run_stdio(cli.verbose, table)?;
     }
@@ -162,10 +162,28 @@ where
 }
 
 fn print_pairing_instructions(signal_url: &str, room: &str, port: u16) {
-    eprintln!("[folk] pairing code: {room}");
-    eprintln!("[folk] give this code to the client and use signaling server: {signal_url}");
-    eprintln!("[folk] local MCP endpoint: http://127.0.0.1:{port}/sse");
-    eprintln!("[folk] waiting for peer...");
+    log_status(&format!("Pairing code: {room}"));
+    log_status(&format!(
+        "Give this code to the client and use signaling server: {signal_url}"
+    ));
+    log_status(&format!("Local MCP endpoint: http://127.0.0.1:{port}/sse"));
+    log_status("Waiting for peer...");
+}
+
+fn log_status(message: &str) {
+    let now = terminal_time();
+    eprintln!("[{now}] {message}");
+}
+
+fn terminal_time() -> String {
+    let seconds = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs() % 86_400)
+        .unwrap_or(0);
+    let hour = seconds / 3_600;
+    let minute = (seconds % 3_600) / 60;
+    let second = seconds % 60;
+    format!("{hour:02}:{minute:02}:{second:02}")
 }
 
 fn print_help() {
