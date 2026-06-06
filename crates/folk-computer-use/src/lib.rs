@@ -7,7 +7,7 @@ use folk_mcp::{
     ToolError, ToolTable, err_result, json_text_result, number_property, object_schema,
     string_property, text_result,
 };
-use rs_peekaboo::automation::Target;
+use rs_peekaboo::automation::{Target, parse_point};
 use rs_peekaboo::{Bounds, Direction, ImageMode, Peekaboo, Point};
 use serde_json::{Value, json};
 use thiserror::Error;
@@ -39,7 +39,19 @@ pub fn register_tools(table: &mut ToolTable) {
     table.register(
         "folk_shell",
         "Run a shell command on the Folk Around host computer, not on the agent provider or remote model server",
-        schema(&[("command", string_property("Shell command to execute on the Folk Around host computer")), ("cwd", string_property("Working directory on the Folk Around host computer"))], &["command"]),
+        schema(
+            &[
+                (
+                    "command",
+                    string_property("Shell command to execute on the Folk Around host computer"),
+                ),
+                (
+                    "cwd",
+                    string_property("Working directory on the Folk Around host computer"),
+                ),
+            ],
+            &["command"],
+        ),
         |args, mode| Ok(shell(args, mode)),
     );
     table.register(
@@ -73,6 +85,45 @@ pub fn register_tools(table: &mut ToolTable) {
         |args, mode| Ok(spawn_command(args, mode)),
     );
     table.register(
+        "folk_image",
+        "Capture an image from the Folk Around host computer",
+        schema(
+            &[
+                ("mode", string_property("Capture mode: screen or window")),
+                (
+                    "path",
+                    string_property("Output path on the Folk Around host computer"),
+                ),
+                ("retina", bool_property("Capture at retina scale")),
+            ],
+            &[],
+        ),
+        |args, mode| Ok(image(args, mode)),
+    );
+    table.register(
+        "folk_see",
+        "Capture an image and cache a UI snapshot for the Folk Around host computer",
+        schema(
+            &[
+                ("app", string_property("Optional app filter")),
+                ("mode", string_property("Capture mode: screen or window")),
+                (
+                    "path",
+                    string_property("Output path on the Folk Around host computer"),
+                ),
+                ("retina", bool_property("Capture at retina scale")),
+            ],
+            &[],
+        ),
+        |args, mode| Ok(see(args, mode)),
+    );
+    table.register(
+        "folk_list_screens",
+        "List display information for the Folk Around host computer",
+        object_schema(BTreeMap::new(), &[]),
+        |_, mode| Ok(list_screens(mode)),
+    );
+    table.register(
         "folk_clipboard_read",
         "Read the Folk Around host computer clipboard",
         object_schema(BTreeMap::new(), &[]),
@@ -89,6 +140,12 @@ pub fn register_tools(table: &mut ToolTable) {
             &["text"],
         ),
         |args, _| Ok(clipboard_write(args)),
+    );
+    table.register(
+        "folk_permissions",
+        "Probe screen recording, accessibility, and clipboard access on the Folk Around host computer",
+        object_schema(BTreeMap::new(), &[]),
+        |_, _| Ok(permissions()),
     );
     table.register(
         "folk_screen_capture",
@@ -120,25 +177,67 @@ pub fn register_tools(table: &mut ToolTable) {
     );
     table.register(
         "folk_click",
-        "Click coordinates on the Folk Around host computer",
+        "Click coordinates or a resolved UI element on the Folk Around host computer",
         schema(
             &[
                 (
                     "element_id",
                     string_property("Stable element ID from folk_ui_snapshot"),
                 ),
+                (
+                    "snapshot",
+                    string_property("Optional snapshot id from folk_ui_snapshot"),
+                ),
                 ("x", number_property("Screen x coordinate")),
                 ("y", number_property("Screen y coordinate")),
+                ("button", string_property("Mouse button: left or right")),
+                ("count", number_property("Click count")),
             ],
             &[],
         ),
         |args, mode| Ok(click(args, mode)),
     );
     table.register(
+        "folk_press",
+        "Press a named key on the Folk Around host computer",
+        schema(
+            &[
+                (
+                    "key",
+                    string_property("Key name such as return, tab, space, or arrows"),
+                ),
+                ("count", number_property("Repeat count")),
+                (
+                    "delay_ms",
+                    number_property("Delay between repeats in milliseconds"),
+                ),
+            ],
+            &["key"],
+        ),
+        |args, mode| Ok(press(args, mode)),
+    );
+    table.register(
         "folk_type",
         "Type text on the Folk Around host computer",
-        schema(&[("text", string_property("Text to type"))], &["text"]),
+        schema(
+            &[
+                ("text", string_property("Text to type")),
+                ("clear", bool_property("Clear the current field first")),
+                ("return", bool_property("Press return after typing")),
+                (
+                    "delay_ms",
+                    number_property("Delay between characters in milliseconds"),
+                ),
+            ],
+            &["text"],
+        ),
         |args, mode| Ok(type_text(args, mode)),
+    );
+    table.register(
+        "folk_paste",
+        "Paste text into the active UI on the Folk Around host computer",
+        schema(&[("text", string_property("Text to paste"))], &["text"]),
+        |args, mode| Ok(paste(args, mode)),
     );
     table.register(
         "folk_hotkey",
@@ -162,13 +261,103 @@ pub fn register_tools(table: &mut ToolTable) {
         |args, mode| Ok(scroll(args, mode)),
     );
     table.register(
+        "folk_swipe",
+        "Swipe between two coordinates on the Folk Around host computer",
+        schema(
+            &[
+                ("from", string_property("Start coordinate as x,y")),
+                ("to", string_property("End coordinate as x,y")),
+                (
+                    "duration_ms",
+                    number_property("Swipe duration in milliseconds"),
+                ),
+            ],
+            &["from", "to"],
+        ),
+        |args, mode| Ok(swipe(args, mode)),
+    );
+    table.register(
+        "folk_drag",
+        "Drag between two coordinates on the Folk Around host computer",
+        schema(
+            &[
+                ("from", string_property("Start coordinate as x,y")),
+                ("to", string_property("End coordinate as x,y")),
+                (
+                    "duration_ms",
+                    number_property("Drag duration in milliseconds"),
+                ),
+            ],
+            &["from", "to"],
+        ),
+        |args, mode| Ok(drag(args, mode)),
+    );
+    table.register(
+        "folk_move",
+        "Move the pointer on the Folk Around host computer",
+        schema(
+            &[
+                (
+                    "element_id",
+                    string_property("Stable element ID from folk_ui_snapshot"),
+                ),
+                (
+                    "snapshot",
+                    string_property("Optional snapshot id from folk_ui_snapshot"),
+                ),
+                ("x", number_property("Screen x coordinate")),
+                ("y", number_property("Screen y coordinate")),
+            ],
+            &[],
+        ),
+        |args, mode| Ok(move_pointer(args, mode)),
+    );
+    table.register(
+        "folk_set_value",
+        "Set the value of a resolved UI element on the Folk Around host computer",
+        schema(
+            &[
+                (
+                    "on",
+                    string_property("Stable element ID or label from folk_ui_snapshot"),
+                ),
+                ("value", string_property("Value to set")),
+                (
+                    "snapshot",
+                    string_property("Optional snapshot id from folk_ui_snapshot"),
+                ),
+            ],
+            &["on", "value"],
+        ),
+        |args, mode| Ok(set_value(args, mode)),
+    );
+    table.register(
+        "folk_perform_action",
+        "Perform an accessibility action on a resolved UI element on the Folk Around host computer",
+        schema(
+            &[
+                (
+                    "on",
+                    string_property("Stable element ID or label from folk_ui_snapshot"),
+                ),
+                ("action", string_property("Accessibility action to perform")),
+                (
+                    "snapshot",
+                    string_property("Optional snapshot id from folk_ui_snapshot"),
+                ),
+            ],
+            &["on", "action"],
+        ),
+        |args, mode| Ok(perform_action(args, mode)),
+    );
+    table.register(
         "folk_window",
-        "List or focus windows on the Folk Around host computer",
+        "List, focus, move, resize, minimize, close, or set bounds of windows on the Folk Around host computer",
         schema(
             &[
                 (
                     "action",
-                    string_property("Window action: list, focus, move, resize, close, minimize"),
+                    string_property("Window action: list, focus, close, minimize, move, resize, set-bounds"),
                 ),
                 ("app", string_property("Application name")),
                 ("title", string_property("Window title")),
@@ -183,12 +372,12 @@ pub fn register_tools(table: &mut ToolTable) {
     );
     table.register(
         "folk_app",
-        "List, launch, activate, or quit apps on the Folk Around host computer",
+        "List, launch, activate, switch, hide, unhide, or quit apps on the Folk Around host computer",
         schema(
             &[
                 (
                     "action",
-                    string_property("App action: list, launch, activate, quit"),
+                    string_property("App action: list, launch, activate, switch, hide, unhide, quit"),
                 ),
                 ("app", string_property("Application name")),
             ],
@@ -197,11 +386,30 @@ pub fn register_tools(table: &mut ToolTable) {
         |args, mode| Ok(app(args, mode)),
     );
     table.register(
+        "folk_open",
+        "Open a path or URL on the Folk Around host computer",
+        schema(
+            &[
+                ("target", string_property("Path or URL to open")),
+                ("app", string_property("Optional app to open with")),
+                (
+                    "no_focus",
+                    bool_property("Open without focusing the target app"),
+                ),
+            ],
+            &["target"],
+        ),
+        |args, mode| Ok(open_target(args, mode)),
+    );
+    table.register(
         "folk_menu",
         "Inspect or click menu items on the Folk Around host computer",
         schema(
             &[
-                ("action", string_property("Menu action: inspect or click")),
+                (
+                    "action",
+                    string_property("Menu action: list, list-all, inspect, or click"),
+                ),
                 ("app", string_property("Application name")),
                 ("menu", string_property("Menu name")),
                 ("item", string_property("Menu item name")),
@@ -210,10 +418,50 @@ pub fn register_tools(table: &mut ToolTable) {
         ),
         |args, mode| Ok(menu(args, mode)),
     );
+    table.register(
+        "folk_run",
+        "Run a JSON automation script on the Folk Around host computer",
+        schema(
+            &[("file", string_property("Path to the script file"))],
+            &["file"],
+        ),
+        |args, mode| Ok(run_file(args, mode)),
+    );
+    table.register(
+        "folk_sleep",
+        "Sleep for a number of seconds on the Folk Around host computer",
+        schema(
+            &[("seconds", number_property("Sleep duration in seconds"))],
+            &["seconds"],
+        ),
+        |args, _| Ok(sleep(args)),
+    );
+    table.register(
+        "folk_clean",
+        "Remove cached snapshots on the Folk Around host computer",
+        schema(
+            &[
+                (
+                    "all_snapshots",
+                    bool_property("Remove all cached snapshots"),
+                ),
+                ("snapshot", string_property("Remove a specific snapshot id")),
+            ],
+            &[],
+        ),
+        |args, mode| Ok(clean(args, mode)),
+    );
 }
 
 fn schema(fields: &[(&'static str, Value)], required: &[&'static str]) -> Value {
     object_schema(fields.iter().cloned().collect(), required)
+}
+
+fn bool_property(description: &'static str) -> Value {
+    json!({
+        "type": "boolean",
+        "description": description
+    })
 }
 
 fn shell(args: Value, mode: AccessMode) -> Value {
@@ -331,6 +579,51 @@ fn screen_capture(args: Value, mode: AccessMode) -> Value {
     flatten(result)
 }
 
+fn image(args: Value, mode: AccessMode) -> Value {
+    let result = (|| {
+        ensure_observation(mode)?;
+        let capture_mode = ImageMode::parse(str_arg(&args, "mode").unwrap_or("screen"));
+        let path = str_arg(&args, "path").map(PathBuf::from);
+        let retina = args.get("retina").and_then(Value::as_bool).unwrap_or(true);
+        let capture = Peekaboo::new().image(capture_mode, path, retina)?;
+        Ok(json_text_result(&json!({
+            "path": capture.path,
+            "mimeType": capture.mime_type,
+            "bytes": capture.bytes,
+            "mode": capture.mode,
+        })))
+    })();
+    flatten(result)
+}
+
+fn see(args: Value, mode: AccessMode) -> Value {
+    let result = (|| {
+        ensure_observation(mode)?;
+        let app = str_arg(&args, "app");
+        let capture_mode = ImageMode::parse(str_arg(&args, "mode").unwrap_or("screen"));
+        let path = str_arg(&args, "path").map(PathBuf::from);
+        let retina = args.get("retina").and_then(Value::as_bool).unwrap_or(true);
+        let snapshot = Peekaboo::new().see(app, capture_mode, path, retina)?;
+        Ok(json_text_result(&json!({
+            "snapshotId": snapshot.snapshot_id,
+            "elements": snapshot.elements,
+        })))
+    })();
+    flatten(result)
+}
+
+fn list_screens(mode: AccessMode) -> Value {
+    let result = (|| {
+        ensure_observation(mode)?;
+        Ok(json_text_result(&Peekaboo::new().list_screens()?))
+    })();
+    flatten(result)
+}
+
+fn permissions() -> Value {
+    json_text_result(&Peekaboo::new().permissions())
+}
+
 fn ui_snapshot(mode: AccessMode) -> Value {
     let result = (|| {
         ensure_observation(mode)?;
@@ -349,7 +642,7 @@ fn click(args: Value, mode: AccessMode) -> Value {
         let target = if let Some(element_id) = str_arg(&args, "element_id") {
             Target::Query {
                 query: element_id.to_string(),
-                snapshot: None,
+                snapshot: str_arg(&args, "snapshot").map(str::to_string),
             }
         } else {
             Target::Point(Point {
@@ -357,7 +650,9 @@ fn click(args: Value, mode: AccessMode) -> Value {
                 y: int_arg(&args, "y").ok_or(ToolExecError::Missing("y"))?,
             })
         };
-        Peekaboo::new().click(target, "left", 1)?;
+        let button = str_arg(&args, "button").unwrap_or("left");
+        let count = int_arg(&args, "count").unwrap_or(1).max(1) as u32;
+        Peekaboo::new().click(target, button, count)?;
         Ok(text_result("clicked"))
     })();
     flatten(result)
@@ -367,8 +662,33 @@ fn type_text(args: Value, mode: AccessMode) -> Value {
     let result = (|| {
         ensure_mutation(mode)?;
         let text = str_arg(&args, "text").ok_or(ToolExecError::Missing("text"))?;
-        Peekaboo::new().type_text(text, false, false, None)?;
+        let clear = args.get("clear").and_then(Value::as_bool).unwrap_or(false);
+        let press_return = args.get("return").and_then(Value::as_bool).unwrap_or(false);
+        let delay_ms = args.get("delay_ms").and_then(Value::as_u64);
+        Peekaboo::new().type_text(text, clear, press_return, delay_ms)?;
         Ok(text_result("typed"))
+    })();
+    flatten(result)
+}
+
+fn press(args: Value, mode: AccessMode) -> Value {
+    let result = (|| {
+        ensure_mutation(mode)?;
+        let key = str_arg(&args, "key").ok_or(ToolExecError::Missing("key"))?;
+        let count = int_arg(&args, "count").unwrap_or(1).max(1) as u32;
+        let delay_ms = args.get("delay_ms").and_then(Value::as_u64);
+        Peekaboo::new().press(key, count, delay_ms)?;
+        Ok(text_result("pressed"))
+    })();
+    flatten(result)
+}
+
+fn paste(args: Value, mode: AccessMode) -> Value {
+    let result = (|| {
+        ensure_mutation(mode)?;
+        let text = str_arg(&args, "text").ok_or(ToolExecError::Missing("text"))?;
+        Peekaboo::new().paste(text)?;
+        Ok(text_result("pasted"))
     })();
     flatten(result)
 }
@@ -410,17 +730,158 @@ fn scroll(args: Value, mode: AccessMode) -> Value {
     flatten(result)
 }
 
+fn swipe(args: Value, mode: AccessMode) -> Value {
+    let result = (|| {
+        ensure_mutation(mode)?;
+        let from = parse_point(str_arg(&args, "from").ok_or(ToolExecError::Missing("from"))?)?;
+        let to = parse_point(str_arg(&args, "to").ok_or(ToolExecError::Missing("to"))?)?;
+        let duration_ms = args
+            .get("duration_ms")
+            .and_then(Value::as_u64)
+            .unwrap_or(250);
+        Peekaboo::new().swipe(Target::Point(from), Target::Point(to), duration_ms)?;
+        Ok(text_result("swiped"))
+    })();
+    flatten(result)
+}
+
+fn drag(args: Value, mode: AccessMode) -> Value {
+    let result = (|| {
+        ensure_mutation(mode)?;
+        let from = parse_point(str_arg(&args, "from").ok_or(ToolExecError::Missing("from"))?)?;
+        let to = parse_point(str_arg(&args, "to").ok_or(ToolExecError::Missing("to"))?)?;
+        let duration_ms = args
+            .get("duration_ms")
+            .and_then(Value::as_u64)
+            .unwrap_or(250);
+        Peekaboo::new().drag(Target::Point(from), Target::Point(to), duration_ms)?;
+        Ok(text_result("dragged"))
+    })();
+    flatten(result)
+}
+
+fn move_pointer(args: Value, mode: AccessMode) -> Value {
+    let result = (|| {
+        ensure_mutation(mode)?;
+        let target = if let Some(element_id) = str_arg(&args, "element_id") {
+            Target::Query {
+                query: element_id.to_string(),
+                snapshot: str_arg(&args, "snapshot").map(str::to_string),
+            }
+        } else {
+            Target::Point(Point {
+                x: int_arg(&args, "x").ok_or(ToolExecError::Missing("x"))?,
+                y: int_arg(&args, "y").ok_or(ToolExecError::Missing("y"))?,
+            })
+        };
+        Peekaboo::new().move_cursor(target)?;
+        Ok(text_result("moved"))
+    })();
+    flatten(result)
+}
+
+fn set_value(args: Value, mode: AccessMode) -> Value {
+    let result = (|| {
+        ensure_mutation(mode)?;
+        let on = str_arg(&args, "on").ok_or(ToolExecError::Missing("on"))?;
+        let snapshot = str_arg(&args, "snapshot").map(str::to_string);
+        let value = str_arg(&args, "value").ok_or(ToolExecError::Missing("value"))?;
+        Peekaboo::new().set_value(
+            Target::Query {
+                query: on.to_string(),
+                snapshot,
+            },
+            value,
+        )?;
+        Ok(text_result("value set"))
+    })();
+    flatten(result)
+}
+
+fn perform_action(args: Value, mode: AccessMode) -> Value {
+    let result = (|| {
+        ensure_mutation(mode)?;
+        let on = str_arg(&args, "on").ok_or(ToolExecError::Missing("on"))?;
+        let snapshot = str_arg(&args, "snapshot").map(str::to_string);
+        let action = str_arg(&args, "action").ok_or(ToolExecError::Missing("action"))?;
+        Peekaboo::new().perform_action(
+            Target::Query {
+                query: on.to_string(),
+                snapshot,
+            },
+            action,
+        )?;
+        Ok(text_result("action performed"))
+    })();
+    flatten(result)
+}
+
+fn open_target(args: Value, mode: AccessMode) -> Value {
+    let result = (|| {
+        ensure_mutation(mode)?;
+        let target = str_arg(&args, "target").ok_or(ToolExecError::Missing("target"))?;
+        let app = str_arg(&args, "app");
+        let no_focus = args
+            .get("no_focus")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        Peekaboo::new().open(target, app, no_focus)?;
+        Ok(text_result("opened"))
+    })();
+    flatten(result)
+}
+
+fn run_file(args: Value, mode: AccessMode) -> Value {
+    let result = (|| {
+        ensure_mutation(mode)?;
+        let file = str_arg(&args, "file").ok_or(ToolExecError::Missing("file"))?;
+        let results = Peekaboo::new().run_file(&PathBuf::from(file))?;
+        Ok(json_text_result(&json!(results)))
+    })();
+    flatten(result)
+}
+
+fn sleep(args: Value) -> Value {
+    let seconds = args.get("seconds").and_then(Value::as_f64).unwrap_or(0.0);
+    let millis = (seconds.max(0.0) * 1000.0) as u64;
+    std::thread::sleep(std::time::Duration::from_millis(millis));
+    json_text_result(&json!({ "slept_ms": millis }))
+}
+
+fn clean(args: Value, mode: AccessMode) -> Value {
+    let result = (|| {
+        ensure_mutation(mode)?;
+        let all = args
+            .get("all_snapshots")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let snapshot = str_arg(&args, "snapshot");
+        let removed = rs_peekaboo::cache::clean_snapshots(all, snapshot)?;
+        Ok(json_text_result(&json!({ "removed": removed })))
+    })();
+    flatten(result)
+}
+
 fn window(args: Value, mode: AccessMode) -> Value {
     let action = str_arg(&args, "action").unwrap_or("");
     if action == "list" {
-        return ui_snapshot(mode);
+        return flatten(
+            Peekaboo::new()
+                .window("list", None, None)
+                .map(|value| json_text_result(&value))
+                .map_err(ToolExecError::from),
+        );
     }
     let result = (|| {
-        ensure_safe_focus_or_full(mode, action)?;
+        if matches!(action, "focus" | "close" | "minimize") {
+            ensure_safe_focus_or_full(mode, action)?;
+        } else {
+            ensure_mutation(mode)?;
+        }
         let app = str_arg(&args, "app").ok_or(ToolExecError::Missing("app"))?;
         match action {
             "focus" | "close" | "minimize" => Peekaboo::new().window(action, Some(app), None)?,
-            "move" | "resize" => {
+            "move" | "resize" | "set-bounds" => {
                 Peekaboo::new().window(action, Some(app), Some(window_bounds(action, &args)?))?
             }
             _ => return Err(ToolExecError::Missing("action")),
@@ -444,6 +905,12 @@ fn window_bounds(action: &str, args: &Value) -> Result<Bounds, ToolExecError> {
             width: int_arg(args, "width").ok_or(ToolExecError::Missing("width"))?,
             height: int_arg(args, "height").ok_or(ToolExecError::Missing("height"))?,
         }),
+        "set-bounds" => Ok(Bounds {
+            x: int_arg(args, "x").ok_or(ToolExecError::Missing("x"))?,
+            y: int_arg(args, "y").ok_or(ToolExecError::Missing("y"))?,
+            width: int_arg(args, "width").ok_or(ToolExecError::Missing("width"))?,
+            height: int_arg(args, "height").ok_or(ToolExecError::Missing("height"))?,
+        }),
         _ => Err(ToolExecError::Missing("action")),
     }
 }
@@ -454,11 +921,16 @@ fn app(args: Value, mode: AccessMode) -> Value {
         return list_apps(mode);
     }
     let result = (|| {
-        ensure_safe_focus_or_full(mode, action)?;
+        if matches!(action, "list" | "activate" | "focus" | "switch") {
+            ensure_safe_focus_or_full(mode, action)?;
+        } else {
+            ensure_mutation(mode)?;
+        }
         let app = str_arg(&args, "app").ok_or(ToolExecError::Missing("app"))?;
         match action {
-            "launch" | "activate" => Peekaboo::new().app(action, Some(app))?,
-            "quit" => Peekaboo::new().app(action, Some(app))?,
+            "launch" | "activate" | "switch" | "hide" | "unhide" | "quit" => {
+                Peekaboo::new().app(action, Some(app))?
+            }
             _ => return Err(ToolExecError::Missing("action")),
         };
         Ok(text_result("app action complete"))
@@ -470,11 +942,15 @@ fn menu(args: Value, mode: AccessMode) -> Value {
     let result = (|| {
         let action = str_arg(&args, "action").ok_or(ToolExecError::Missing("action"))?;
         let app = str_arg(&args, "app").ok_or(ToolExecError::Missing("app"))?;
-        if action == "inspect" {
+        if matches!(action, "list" | "list-all" | "inspect") {
             ensure_observation(mode)?;
-            return Ok(json_text_result(
-                &Peekaboo::new().menu("list", app, None, None)?,
-            ));
+            let action_name = if action == "inspect" { "list" } else { action };
+            return Ok(json_text_result(&Peekaboo::new().menu(
+                action_name,
+                app,
+                None,
+                None,
+            )?));
         }
         ensure_mutation(mode)?;
         let menu = str_arg(&args, "menu").ok_or(ToolExecError::Missing("menu"))?;
@@ -665,5 +1141,51 @@ mod tests {
     fn limited_launch_should_be_blocked() {
         assert!(ensure_safe_focus_or_full(AccessMode::Limited, "launch").is_err());
         assert!(ensure_safe_focus_or_full(AccessMode::Limited, "activate").is_ok());
+    }
+
+    #[test]
+    fn tool_registration_should_cover_the_full_peekaboo_surface() {
+        let mut table = ToolTable::new(AccessMode::Full);
+        register_tools(&mut table);
+        let names = table
+            .list()
+            .iter()
+            .map(|tool| tool.name)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            vec![
+                "folk_shell",
+                "folk_system_info",
+                "folk_list_apps",
+                "folk_spawn",
+                "folk_image",
+                "folk_see",
+                "folk_list_screens",
+                "folk_clipboard_read",
+                "folk_clipboard_write",
+                "folk_permissions",
+                "folk_screen_capture",
+                "folk_ui_snapshot",
+                "folk_click",
+                "folk_press",
+                "folk_type",
+                "folk_paste",
+                "folk_hotkey",
+                "folk_scroll",
+                "folk_swipe",
+                "folk_drag",
+                "folk_move",
+                "folk_set_value",
+                "folk_perform_action",
+                "folk_window",
+                "folk_app",
+                "folk_open",
+                "folk_menu",
+                "folk_run",
+                "folk_sleep",
+                "folk_clean",
+            ]
+        );
     }
 }
