@@ -391,6 +391,7 @@ dependencies = [
 name = "folk-computer-use"
 version = "0.3.0"
 dependencies = [
+ "base64",
  "folk-core",
  "folk-mcp",
  "rs_peekaboo",

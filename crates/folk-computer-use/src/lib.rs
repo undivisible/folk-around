@@ -1,14 +1,15 @@
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+use base64::Engine;
 use folk_core::AccessMode;
 use folk_mcp::{
     ToolError, ToolTable, err_result, json_text_result, number_property, object_schema,
     string_property, text_result,
 };
 use rs_peekaboo::automation::{Target, parse_point};
-use rs_peekaboo::{Bounds, Direction, ImageMode, Peekaboo, Point};
+use rs_peekaboo::{Bounds, Direction, ImageMode, Peekaboo, Point, Snapshot};
 use serde_json::{Value, json};
 use thiserror::Error;
 
@@ -569,12 +570,13 @@ fn screen_capture(args: Value, mode: AccessMode) -> Value {
         } else {
             Peekaboo::new().image(ImageMode::Screen, path, true)?
         };
-        Ok(json_text_result(&json!({
+        let metadata = json!({
             "path": capture.path,
             "mimeType": capture.mime_type,
             "bytes": capture.bytes,
             "target": target
-        })))
+        });
+        image_result(metadata, &capture.path, &capture.mime_type)
     })();
     flatten(result)
 }
@@ -586,12 +588,13 @@ fn image(args: Value, mode: AccessMode) -> Value {
         let path = str_arg(&args, "path").map(PathBuf::from);
         let retina = args.get("retina").and_then(Value::as_bool).unwrap_or(true);
         let capture = Peekaboo::new().image(capture_mode, path, retina)?;
-        Ok(json_text_result(&json!({
+        let metadata = json!({
             "path": capture.path,
             "mimeType": capture.mime_type,
             "bytes": capture.bytes,
             "mode": capture.mode,
-        })))
+        });
+        image_result(metadata, &capture.path, &capture.mime_type)
     })();
     flatten(result)
 }
@@ -603,11 +606,25 @@ fn see(args: Value, mode: AccessMode) -> Value {
         let capture_mode = ImageMode::parse(str_arg(&args, "mode").unwrap_or("screen"));
         let path = str_arg(&args, "path").map(PathBuf::from);
         let retina = args.get("retina").and_then(Value::as_bool).unwrap_or(true);
-        let snapshot = Peekaboo::new().see(app, capture_mode, path, retina)?;
-        Ok(json_text_result(&json!({
+        let peekaboo = Peekaboo::new();
+        let capture = peekaboo.image(capture_mode, path, retina)?;
+        let snapshot_id = rs_peekaboo::cache::new_snapshot_id();
+        let snapshot = Snapshot {
+            snapshot_id,
+            elements: peekaboo.ui_elements(app)?,
+        };
+        rs_peekaboo::cache::save_snapshot(&snapshot)?;
+        let metadata = json!({
             "snapshotId": snapshot.snapshot_id,
             "elements": snapshot.elements,
-        })))
+            "image": {
+                "path": capture.path,
+                "mimeType": capture.mime_type,
+                "bytes": capture.bytes,
+                "mode": capture.mode,
+            }
+        });
+        image_result(metadata, &capture.path, &capture.mime_type)
     })();
     flatten(result)
 }
@@ -988,6 +1005,22 @@ fn flatten(result: Result<Value, ToolExecError>) -> Value {
     }
 }
 
+fn image_result(value: Value, image_path: &Path, mime_type: &str) -> Result<Value, ToolExecError> {
+    let data = std::fs::read(image_path)?;
+    let text = serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string());
+    Ok(json!({
+        "content": [
+            { "type": "text", "text": text },
+            {
+                "type": "image",
+                "data": base64::engine::general_purpose::STANDARD.encode(data),
+                "mimeType": mime_type
+            }
+        ],
+        "structuredContent": value
+    }))
+}
+
 fn restricted_command(command: &str) -> Option<(&str, Vec<&str>)> {
     if command
         .chars()
@@ -1141,6 +1174,30 @@ mod tests {
     fn limited_launch_should_be_blocked() {
         assert!(ensure_safe_focus_or_full(AccessMode::Limited, "launch").is_err());
         assert!(ensure_safe_focus_or_full(AccessMode::Limited, "activate").is_ok());
+    }
+
+    #[test]
+    fn image_result_should_embed_mcp_image_content() {
+        let path = std::env::temp_dir().join(format!(
+            "folk-around-image-result-{}.png",
+            std::process::id()
+        ));
+        std::fs::write(&path, [1_u8, 2, 3, 4]).unwrap();
+
+        let response = image_result(json!({ "path": path }), &path, "image/png").unwrap();
+        let content = response["content"].as_array().unwrap();
+
+        assert_eq!(content.len(), 2);
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[1]["type"], "image");
+        assert_eq!(content[1]["mimeType"], "image/png");
+        assert_eq!(content[1]["data"], "AQIDBA==");
+        assert_eq!(
+            response["structuredContent"]["path"].as_str().unwrap(),
+            path.to_string_lossy()
+        );
+
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]
