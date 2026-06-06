@@ -3,14 +3,19 @@ set -euo pipefail
 
 REPO="undivisible/folk-around"
 BIN="${FOLK_AROUND_BIN:-/usr/local/bin/folk-around}"
-VERSION="${1:-v0.3.0}"
+VERSION="${1:-v0.3.1}"
 
 case "$VERSION" in
-  0.3.0|latest) VERSION="v0.3.0" ;;
+  0.3.1|latest) VERSION="v0.3.1" ;;
+  0.3.0) VERSION="v0.3.0" ;;
 esac
 
 sha256_for_asset() {
   case "$1:$2" in
+    v0.3.1:folk-around-darwin-aarch64) printf '%s\n' "4fffd0ebe4015c8dbb56c46d0888576ad5579c53f2052cb89ace1038f5c7f54e" ;;
+    v0.3.1:folk-around-darwin-x86_64) printf '%s\n' "d9368e10fedb6d3e4ef5b730832f7715c60a3aa9b177b51aa1c8c530bbb45d50" ;;
+    v0.3.1:folk-around-linux-aarch64) printf '%s\n' "eb4093762fabfdb1c4592dbb2e3b82185bd0cebcd97cdc7788bc2de3ec96f2b3" ;;
+    v0.3.1:folk-around-linux-x86_64) printf '%s\n' "6b19653a12d3e93217cf1911eb709b35b10c186572a6e1ab570647a6875d91cd" ;;
     v0.3.0:folk-around-darwin-aarch64) printf '%s\n' "1915ae43fd8f67856e39b57f6f78006e14a08b3d8068a41df9f0f62ab4fb7171" ;;
     v0.3.0:folk-around-darwin-x86_64) printf '%s\n' "c73d124d64d7d9f4129650476efd44ad16bca156c61c1bbe5bfe55ac60bdeb8b" ;;
     v0.3.0:folk-around-linux-aarch64) printf '%s\n' "e8d28076c11d5800d8fc0151f11837318caf168f9c4116224ce39c499de5fd6d" ;;
