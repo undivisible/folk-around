@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::process::Command;
 use std::sync::Arc;
 
 use folk_core::AccessMode;
@@ -159,7 +160,7 @@ pub fn handle_message(
                         }
                     },
                     "serverInfo": {
-                        "name": "folk-around",
+                        "name": integration_name("folk-around"),
                         "version": env!("CARGO_PKG_VERSION")
                     }
                 }),
@@ -259,6 +260,33 @@ fn error_response(id: Value, code: i32, message: &str) -> Result<String, serde_j
     }))
 }
 
+fn integration_name(base: &str) -> String {
+    let raw = std::env::var("COMPUTERNAME")
+        .or_else(|_| std::env::var("HOSTNAME"))
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| {
+            Command::new("hostname")
+                .output()
+                .ok()
+                .and_then(|output| String::from_utf8(output.stdout).ok())
+                .unwrap_or_default()
+        });
+    let suffix = raw
+        .trim()
+        .to_ascii_lowercase()
+        .chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '-' })
+        .collect::<String>()
+        .trim_matches('-')
+        .to_string();
+    if suffix.is_empty() {
+        base.to_string()
+    } else {
+        format!("{base}-{suffix}")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -275,6 +303,12 @@ mod tests {
         .unwrap();
         let value: Value = serde_json::from_str(&response).unwrap();
         assert_eq!(value["result"]["protocolVersion"], "2024-11-05");
+        assert!(
+            value["result"]["serverInfo"]["name"]
+                .as_str()
+                .unwrap()
+                .starts_with("folk-around")
+        );
     }
 
     #[test]
