@@ -378,7 +378,7 @@ checksum = "d9c4f5dac5e15c24eb999c26181a6ca40b39fe946cbe4c263c7209467bc83af2"
 
 [[package]]
 name = "folk-around"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "folk-computer-use",
  "folk-core",
@@ -389,7 +389,7 @@ dependencies = [
 
 [[package]]
 name = "folk-computer-use"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "base64",
  "folk-core",
@@ -401,7 +401,7 @@ dependencies = [
 
 [[package]]
 name = "folk-core"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "rand",
  "thiserror",
@@ -409,7 +409,7 @@ dependencies = [
 
 [[package]]
 name = "folk-mcp"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "folk-core",
  "serde",
@@ -419,7 +419,7 @@ dependencies = [
 
 [[package]]
 name = "folk-transport"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "base64",
  "chacha20poly1305",
