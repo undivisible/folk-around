@@ -8,8 +8,8 @@ use folk_mcp::{
     ToolError, ToolTable, err_result, json_text_result, number_property, object_schema,
     string_property, text_result,
 };
-use rs_peekaboo::automation::{Target, parse_point};
-use rs_peekaboo::{Bounds, Direction, ImageMode, Peekaboo, Point, Snapshot};
+use rs_peekaboo::automation::{Target, parse_point, validate_output_path};
+use rs_peekaboo::{Bounds, Direction, ImageCapture, ImageMode, Peekaboo, Point, Snapshot};
 use serde_json::{Value, json};
 use thiserror::Error;
 
@@ -144,9 +144,15 @@ pub fn register_tools(table: &mut ToolTable) {
     );
     table.register(
         "folk_permissions",
-        "Probe screen recording, accessibility, and clipboard access on the Folk Around host computer",
-        object_schema(BTreeMap::new(), &[]),
-        |_, _| Ok(permissions()),
+        "Probe or grant screen recording, accessibility, and clipboard access on the Folk Around host computer",
+        schema(
+            &[(
+                "action",
+                string_property("Optional action: grant"),
+            )],
+            &[],
+        ),
+        |args, _| Ok(permissions(args)),
     );
     table.register(
         "folk_screen_capture",
@@ -545,7 +551,7 @@ fn screen_capture(args: Value, mode: AccessMode) -> Value {
     let result = (|| {
         ensure_observation(mode)?;
         let target = str_arg(&args, "target").unwrap_or("display");
-        let path = str_arg(&args, "path").map(PathBuf::from);
+        let path = optional_output_path(&args)?;
         let capture = if target == "region" {
             let x = int_arg(&args, "x").unwrap_or(0);
             let y = int_arg(&args, "y").unwrap_or(0);
@@ -574,9 +580,10 @@ fn screen_capture(args: Value, mode: AccessMode) -> Value {
             "path": capture.path,
             "mimeType": capture.mime_type,
             "bytes": capture.bytes,
-            "target": target
+            "target": target,
+            "ephemeral": capture.ephemeral,
         });
-        image_result(metadata, &capture.path, &capture.mime_type)
+        image_result(metadata, &capture)
     })();
     flatten(result)
 }
@@ -584,8 +591,8 @@ fn screen_capture(args: Value, mode: AccessMode) -> Value {
 fn image(args: Value, mode: AccessMode) -> Value {
     let result = (|| {
         ensure_observation(mode)?;
-        let capture_mode = ImageMode::parse(str_arg(&args, "mode").unwrap_or("screen"));
-        let path = str_arg(&args, "path").map(PathBuf::from);
+        let capture_mode = ImageMode::parse_or_err(str_arg(&args, "mode").unwrap_or("screen"))?;
+        let path = optional_output_path(&args)?;
         let retina = args.get("retina").and_then(Value::as_bool).unwrap_or(true);
         let capture = Peekaboo::new().image(capture_mode, path, retina)?;
         let metadata = json!({
@@ -593,8 +600,9 @@ fn image(args: Value, mode: AccessMode) -> Value {
             "mimeType": capture.mime_type,
             "bytes": capture.bytes,
             "mode": capture.mode,
+            "ephemeral": capture.ephemeral,
         });
-        image_result(metadata, &capture.path, &capture.mime_type)
+        image_result(metadata, &capture)
     })();
     flatten(result)
 }
@@ -603,8 +611,8 @@ fn see(args: Value, mode: AccessMode) -> Value {
     let result = (|| {
         ensure_observation(mode)?;
         let app = str_arg(&args, "app");
-        let capture_mode = ImageMode::parse(str_arg(&args, "mode").unwrap_or("screen"));
-        let path = str_arg(&args, "path").map(PathBuf::from);
+        let capture_mode = ImageMode::parse_or_err(str_arg(&args, "mode").unwrap_or("screen"))?;
+        let path = optional_output_path(&args)?;
         let retina = args.get("retina").and_then(Value::as_bool).unwrap_or(true);
         let peekaboo = Peekaboo::new();
         let capture = peekaboo.image(capture_mode, path, retina)?;
@@ -622,9 +630,10 @@ fn see(args: Value, mode: AccessMode) -> Value {
                 "mimeType": capture.mime_type,
                 "bytes": capture.bytes,
                 "mode": capture.mode,
+                "ephemeral": capture.ephemeral,
             }
         });
-        image_result(metadata, &capture.path, &capture.mime_type)
+        image_result(metadata, &capture)
     })();
     flatten(result)
 }
@@ -637,8 +646,18 @@ fn list_screens(mode: AccessMode) -> Value {
     flatten(result)
 }
 
-fn permissions() -> Value {
-    json_text_result(&Peekaboo::new().permissions())
+fn permissions(args: Value) -> Value {
+    let result: Result<Value, ToolExecError> = (|| {
+        if str_arg(&args, "action") == Some("grant") {
+            Ok(Peekaboo::new().grant_permissions()?)
+        } else {
+            Ok(Peekaboo::new().permissions())
+        }
+    })();
+    match result {
+        Ok(value) => json_text_result(&value),
+        Err(err) => err_result(err.to_string()),
+    }
 }
 
 fn ui_snapshot(mode: AccessMode) -> Value {
@@ -682,7 +701,7 @@ fn type_text(args: Value, mode: AccessMode) -> Value {
         let clear = args.get("clear").and_then(Value::as_bool).unwrap_or(false);
         let press_return = args.get("return").and_then(Value::as_bool).unwrap_or(false);
         let delay_ms = args.get("delay_ms").and_then(Value::as_u64);
-        Peekaboo::new().type_text(text, clear, press_return, delay_ms)?;
+        Peekaboo::new().type_text(text, clear, press_return, delay_ms, str_arg(&args, "app"))?;
         Ok(text_result("typed"))
     })();
     flatten(result)
@@ -884,7 +903,7 @@ fn window(args: Value, mode: AccessMode) -> Value {
     if action == "list" {
         return flatten(
             Peekaboo::new()
-                .window("list", None, None)
+                .window("list", None, None, None)
                 .map(|value| json_text_result(&value))
                 .map_err(ToolExecError::from),
         );
@@ -897,10 +916,15 @@ fn window(args: Value, mode: AccessMode) -> Value {
         }
         let app = str_arg(&args, "app").ok_or(ToolExecError::Missing("app"))?;
         match action {
-            "focus" | "close" | "minimize" => Peekaboo::new().window(action, Some(app), None)?,
-            "move" | "resize" | "set-bounds" => {
-                Peekaboo::new().window(action, Some(app), Some(window_bounds(action, &args)?))?
+            "focus" | "close" | "minimize" => {
+                Peekaboo::new().window(action, Some(app), None, None)?
             }
+            "move" | "resize" | "set-bounds" => Peekaboo::new().window(
+                action,
+                Some(app),
+                None,
+                Some(window_bounds(action, &args)?),
+            )?,
             _ => return Err(ToolExecError::Missing("action")),
         };
         Ok(text_result("window action complete"))
@@ -1005,20 +1029,33 @@ fn flatten(result: Result<Value, ToolExecError>) -> Value {
     }
 }
 
-fn image_result(value: Value, image_path: &Path, mime_type: &str) -> Result<Value, ToolExecError> {
-    let data = std::fs::read(image_path)?;
+fn image_result(value: Value, capture: &ImageCapture) -> Result<Value, ToolExecError> {
+    let data = std::fs::read(&capture.path)?;
     let text = serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string());
-    Ok(json!({
+    let response = json!({
         "content": [
             { "type": "text", "text": text },
             {
                 "type": "image",
                 "data": base64::engine::general_purpose::STANDARD.encode(data),
-                "mimeType": mime_type
+                "mimeType": capture.mime_type
             }
         ],
         "structuredContent": value
-    }))
+    });
+    if capture.ephemeral {
+        let _ = std::fs::remove_file(&capture.path);
+    }
+    Ok(response)
+}
+
+fn optional_output_path(args: &Value) -> Result<Option<PathBuf>, ToolExecError> {
+    match str_arg(args, "path") {
+        Some(path) => Ok(Some(
+            validate_output_path(Path::new(path)).map_err(ToolExecError::Peekaboo)?,
+        )),
+        None => Ok(None),
+    }
 }
 
 fn restricted_command(command: &str) -> Option<(&str, Vec<&str>)> {
@@ -1184,7 +1221,14 @@ mod tests {
         ));
         std::fs::write(&path, [1_u8, 2, 3, 4]).unwrap();
 
-        let response = image_result(json!({ "path": path }), &path, "image/png").unwrap();
+        let capture = ImageCapture {
+            path: path.clone(),
+            mode: ImageMode::Screen,
+            bytes: 4,
+            mime_type: "image/png".to_string(),
+            ephemeral: false,
+        };
+        let response = image_result(json!({ "path": path }), &capture).unwrap();
         let content = response["content"].as_array().unwrap();
 
         assert_eq!(content.len(), 2);
