@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "MCP agent for computer control with stdio, HTTP SSE, and P2P transports"
 
 [[bin]]
 name = "folk-around"

@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "stdio, HTTP SSE, and WebSocket signaling transports for folk-around"
 
 [dependencies]
 base64.workspace = true
