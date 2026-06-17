@@ -38,10 +38,7 @@ class FakeSocket {
   }
 }
 
-function fakeJoin(
-  room: SignalRoom,
-  identity: string,
-): FakeSocket {
+function fakeJoin(room: SignalRoom, identity: string): FakeSocket {
   const socket = new FakeSocket();
   (room as any).handleMessage(socket, { type: "join", identity });
   return socket;
@@ -200,6 +197,9 @@ test("signal room rejects join during grace period", () => {
 
   expect(second.closed).toBe(true);
   expect(second.sent).toEqual([
-    JSON.stringify({ type: "error", message: "Identity recently joined, try later" }),
+    JSON.stringify({
+      type: "error",
+      message: "Identity recently joined, try later",
+    }),
   ]);
 });

@@ -252,7 +252,7 @@ export class SignalRoom implements DurableObject {
   }
 
   private checkRateLimit(server: WebSocket): boolean {
-    const key = this.sockets.get(server) || server as unknown as string;
+    const key = this.sockets.get(server) || (server as unknown as string);
     const now = Date.now();
     let entry = this.rateLimit.get(key);
     if (!entry || now >= entry.resetAt) {
