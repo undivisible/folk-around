@@ -15,12 +15,18 @@ esac
 
 sha256_for_asset() {
   case "$1:$2" in
+    v0.3.4:folk-around-darwin-aarch64) printf '%s\n' "35b8c6be0b39def15e6e28ab11696139f4ec4c2801c6819f481c471f9c8bb1a0" ;;
+    v0.3.4:folk-around-darwin-x86_64) printf '%s\n' "11327fa79f7027cd6c73a57ae56ebc1ea3e5195a3446fce3223b4822e1320c7a" ;;
+    v0.3.4:folk-around-linux-x86_64) printf '%s\n' "c4c7421210b81c84c622165266aecf7142258ba61a46f245d62dc2ac8772af7b" ;;
+    v0.3.3:folk-around-darwin-aarch64) printf '%s\n' "407dd826a643c2972f4f92d8f65b4cf590b4de25d6bead9724b528370e66fb65" ;;
+    v0.3.3:folk-around-darwin-x86_64) printf '%s\n' "7d4a9df52efbb2702b306b3cb16c80c48c1137f60837afbabf3958a11c0a91e6" ;;
+    v0.3.3:folk-around-linux-aarch64) printf '%s\n' "6e68803d66328b2d67e8da806b718473fa471f94afcf1d18f919bb4819042df6" ;;
+    v0.3.3:folk-around-linux-x86_64) printf '%s\n' "b181506e3628936eae0722cfda5ca21ed2e2d6922bb3e98bb5e7c7a1453f3201" ;;
     v0.3.2:folk-around-darwin-aarch64) printf '%s\n' "0b3ba3f7a7dcd2670bdc0759d12bae349713a3fb47f233fdede5b743b5ad1a64" ;;
     v0.3.2:folk-around-darwin-x86_64) printf '%s\n' "40396b90f55f6cfca6a3d931d7d85ab2b278c58861383c66e0ee857538cf18e0" ;;
     v0.3.2:folk-around-linux-aarch64) printf '%s\n' "3118c659c55d53fc7b609a9d1ba7e7f7030b3f98c48aea01f006c75676eff9e6" ;;
     v0.3.2:folk-around-linux-x86_64) printf '%s\n' "218f8179b095d35eaa7d95a94bc4b2c624244c8b8a4a6cdbc028da32eb01dee8" ;;
     v0.3.1:folk-around-darwin-aarch64) printf '%s\n' "4fffd0ebe4015c8dbb56c46d0888576ad5579c53f2052cb89ace1038f5c7f54e" ;;
-    v0.3.1:folk-around-darwin-x86_64) printf '%s\n' "d9368e10fedb6d3e4ef5b730832f7715c60a3aa9b177b51aa1c8c530bbb45d50" ;;
     v0.3.1:folk-around-linux-aarch64) printf '%s\n' "eb4093762fabfdb1c4592dbb2e3b82185bd0cebcd97cdc7788bc2de3ec96f2b3" ;;
     v0.3.1:folk-around-linux-x86_64) printf '%s\n' "6b19653a12d3e93217cf1911eb709b35b10c186572a6e1ab570647a6875d91cd" ;;
     v0.3.0:folk-around-darwin-aarch64) printf '%s\n' "1915ae43fd8f67856e39b57f6f78006e14a08b3d8068a41df9f0f62ab4fb7171" ;;
