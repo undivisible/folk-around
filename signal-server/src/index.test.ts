@@ -26,11 +26,25 @@ test("root endpoint returns service page without asset binding", async () => {
 });
 
 class FakeSocket {
+  closed = false;
   sent: string[] = [];
 
   send(message: string) {
     this.sent.push(message);
   }
+
+  close(code?: number, reason?: string) {
+    this.closed = true;
+  }
+}
+
+function fakeJoin(
+  room: SignalRoom,
+  identity: string,
+): FakeSocket {
+  const socket = new FakeSocket();
+  (room as any).handleMessage(socket, { type: "join", identity });
+  return socket;
 }
 
 test("signal room rejects join without hex identity", () => {
@@ -46,21 +60,13 @@ test("signal room rejects join without hex identity", () => {
 
 test("signal room forwards relay only to target peer", () => {
   const room = new SignalRoom();
-  const first = new FakeSocket();
-  const second = new FakeSocket();
   const firstIdentity =
     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
   const secondIdentity =
     "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
-  (room as any).handleMessage(first, {
-    type: "join",
-    identity: firstIdentity,
-  });
-  (room as any).handleMessage(second, {
-    type: "join",
-    identity: secondIdentity,
-  });
+  const first = fakeJoin(room, firstIdentity);
+  const second = fakeJoin(room, secondIdentity);
   first.sent = [];
   second.sent = [];
 
@@ -83,8 +89,6 @@ test("signal room forwards relay only to target peer", () => {
 
 test("signal room forwards opaque encrypted relay data", () => {
   const room = new SignalRoom();
-  const first = new FakeSocket();
-  const second = new FakeSocket();
   const firstIdentity =
     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
   const secondIdentity =
@@ -92,14 +96,8 @@ test("signal room forwards opaque encrypted relay data", () => {
   const encryptedData =
     "v1:XS6CFkLB4xd4RZ+7gVsDCMf/7oOfDK83SwcKz00y60U=:PZ0/zeyJub25jZSI6InRlc3QiLCJjdCI6Ilp6In0=";
 
-  (room as any).handleMessage(first, {
-    type: "join",
-    identity: firstIdentity,
-  });
-  (room as any).handleMessage(second, {
-    type: "join",
-    identity: secondIdentity,
-  });
+  const first = fakeJoin(room, firstIdentity);
+  const second = fakeJoin(room, secondIdentity);
   first.sent = [];
   second.sent = [];
 
@@ -122,23 +120,14 @@ test("signal room forwards opaque encrypted relay data", () => {
 
 test("signal room rejects spoofed sender identity", () => {
   const room = new SignalRoom();
-  const first = new FakeSocket();
-  const second = new FakeSocket();
   const firstIdentity =
     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
   const secondIdentity =
     "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
-  (room as any).handleMessage(first, {
-    type: "join",
-    identity: firstIdentity,
-  });
-  (room as any).handleMessage(second, {
-    type: "join",
-    identity: secondIdentity,
-  });
+  const first = fakeJoin(room, firstIdentity);
+  fakeJoin(room, secondIdentity);
   first.sent = [];
-  second.sent = [];
 
   (room as any).handleMessage(first, {
     type: "relay",
@@ -150,19 +139,14 @@ test("signal room rejects spoofed sender identity", () => {
   expect(first.sent).toEqual([
     JSON.stringify({ type: "error", message: "Sender identity mismatch" }),
   ]);
-  expect(second.sent).toEqual([]);
 });
 
 test("signal room rejects relay with invalid target identity", () => {
   const room = new SignalRoom();
-  const first = new FakeSocket();
   const firstIdentity =
     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
-  (room as any).handleMessage(first, {
-    type: "join",
-    identity: firstIdentity,
-  });
+  const first = fakeJoin(room, firstIdentity);
   first.sent = [];
 
   (room as any).handleMessage(first, {
@@ -179,21 +163,13 @@ test("signal room rejects relay with invalid target identity", () => {
 
 test("signal room rejects oversized relay data", () => {
   const room = new SignalRoom();
-  const first = new FakeSocket();
-  const second = new FakeSocket();
   const firstIdentity =
     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
   const secondIdentity =
     "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
-  (room as any).handleMessage(first, {
-    type: "join",
-    identity: firstIdentity,
-  });
-  (room as any).handleMessage(second, {
-    type: "join",
-    identity: secondIdentity,
-  });
+  const first = fakeJoin(room, firstIdentity);
+  const second = fakeJoin(room, secondIdentity);
   first.sent = [];
   second.sent = [];
 
@@ -208,4 +184,22 @@ test("signal room rejects oversized relay data", () => {
     JSON.stringify({ type: "error", message: "Message too large" }),
   ]);
   expect(second.sent).toEqual([]);
+});
+
+test("signal room rejects join during grace period", () => {
+  const room = new SignalRoom();
+  const identity =
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+  const first = fakeJoin(room, identity);
+  expect(first.closed).toBe(false);
+
+  // second join should be rejected (within grace period)
+  const second = new FakeSocket();
+  (room as any).handleMessage(second, { type: "join", identity });
+
+  expect(second.closed).toBe(true);
+  expect(second.sent).toEqual([
+    JSON.stringify({ type: "error", message: "Identity recently joined, try later" }),
+  ]);
 });

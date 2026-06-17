@@ -1,12 +1,11 @@
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use base64::Engine;
 use folk_core::AccessMode;
 use folk_mcp::{
-    ToolError, ToolTable, err_result, json_text_result, number_property, object_schema,
-    string_property, text_result,
+    ToolError, ToolTable, empty_schema, err_result, json_text_result, number_property,
+    object_schema, string_property, text_result,
 };
 use rs_peekaboo::automation::{Target, parse_point, validate_output_path};
 use rs_peekaboo::{Bounds, Direction, ImageCapture, ImageMode, Peekaboo, Point, Snapshot};
@@ -58,7 +57,7 @@ pub fn register_tools(table: &mut ToolTable) {
     table.register(
         "folk_system_info",
         "Return OS and CPU details for the Folk Around host computer",
-        object_schema(BTreeMap::new(), &[]),
+        empty_schema(),
         |_, _| {
             Ok(text_result(format!(
                 "os: {}\narch: {}",
@@ -70,7 +69,7 @@ pub fn register_tools(table: &mut ToolTable) {
     table.register(
         "folk_list_apps",
         "List running processes on the Folk Around host computer",
-        object_schema(BTreeMap::new(), &[]),
+        empty_schema(),
         |_, mode| Ok(list_apps(mode)),
     );
     table.register(
@@ -121,13 +120,13 @@ pub fn register_tools(table: &mut ToolTable) {
     table.register(
         "folk_list_screens",
         "List display information for the Folk Around host computer",
-        object_schema(BTreeMap::new(), &[]),
+        empty_schema(),
         |_, mode| Ok(list_screens(mode)),
     );
     table.register(
         "folk_clipboard_read",
         "Read the Folk Around host computer clipboard",
-        object_schema(BTreeMap::new(), &[]),
+        empty_schema(),
         |_, _| Ok(clipboard_read()),
     );
     table.register(
@@ -179,7 +178,7 @@ pub fn register_tools(table: &mut ToolTable) {
     table.register(
         "folk_ui_snapshot",
         "Return structured app and window context for the Folk Around host computer",
-        object_schema(BTreeMap::new(), &[]),
+        empty_schema(),
         |_, mode| Ok(ui_snapshot(mode)),
     );
     table.register(
@@ -547,9 +546,10 @@ fn clipboard_write(args: Value) -> Value {
     flatten(result)
 }
 
-fn screen_capture(args: Value, mode: AccessMode) -> Value {
+fn screen_capture(args: Value, _mode: AccessMode) -> Value {
     let result = (|| {
-        ensure_observation(mode)?;
+        // ponytail: ensure_observation removed - was a no-op. Add back when a mode restricts observation.
+
         let target = str_arg(&args, "target").unwrap_or("display");
         let path = optional_output_path(&args)?;
         let capture = if target == "region" {
@@ -588,9 +588,8 @@ fn screen_capture(args: Value, mode: AccessMode) -> Value {
     flatten(result)
 }
 
-fn image(args: Value, mode: AccessMode) -> Value {
+fn image(args: Value, _mode: AccessMode) -> Value {
     let result = (|| {
-        ensure_observation(mode)?;
         let capture_mode = ImageMode::parse_or_err(str_arg(&args, "mode").unwrap_or("screen"))?;
         let path = optional_output_path(&args)?;
         let retina = args.get("retina").and_then(Value::as_bool).unwrap_or(true);
@@ -607,9 +606,8 @@ fn image(args: Value, mode: AccessMode) -> Value {
     flatten(result)
 }
 
-fn see(args: Value, mode: AccessMode) -> Value {
+fn see(args: Value, _mode: AccessMode) -> Value {
     let result = (|| {
-        ensure_observation(mode)?;
         let app = str_arg(&args, "app");
         let capture_mode = ImageMode::parse_or_err(str_arg(&args, "mode").unwrap_or("screen"))?;
         let path = optional_output_path(&args)?;
@@ -638,11 +636,8 @@ fn see(args: Value, mode: AccessMode) -> Value {
     flatten(result)
 }
 
-fn list_screens(mode: AccessMode) -> Value {
-    let result = (|| {
-        ensure_observation(mode)?;
-        Ok(json_text_result(&Peekaboo::new().list_screens()?))
-    })();
+fn list_screens(_mode: AccessMode) -> Value {
+    let result = (|| Ok(json_text_result(&Peekaboo::new().list_screens()?)))();
     flatten(result)
 }
 
@@ -660,9 +655,8 @@ fn permissions(args: Value) -> Value {
     }
 }
 
-fn ui_snapshot(mode: AccessMode) -> Value {
+fn ui_snapshot(_mode: AccessMode) -> Value {
     let result = (|| {
-        ensure_observation(mode)?;
         let elements = serde_json::to_value(Peekaboo::new().ui_elements(None)?)?;
         Ok(json_text_result(&json!({
             "platform": "macos",
@@ -984,7 +978,8 @@ fn menu(args: Value, mode: AccessMode) -> Value {
         let action = str_arg(&args, "action").ok_or(ToolExecError::Missing("action"))?;
         let app = str_arg(&args, "app").ok_or(ToolExecError::Missing("app"))?;
         if matches!(action, "list" | "list-all" | "inspect") {
-            ensure_observation(mode)?;
+            // ponytail: ensure_observation removed - was a no-op.
+
             let action_name = if action == "inspect" { "list" } else { action };
             return Ok(json_text_result(&Peekaboo::new().menu(
                 action_name,
@@ -1000,10 +995,6 @@ fn menu(args: Value, mode: AccessMode) -> Value {
         Ok(text_result("menu action complete"))
     })();
     flatten(result)
-}
-
-fn ensure_observation(_mode: AccessMode) -> Result<(), ToolExecError> {
-    Ok(())
 }
 
 fn ensure_mutation(mode: AccessMode) -> Result<(), ToolExecError> {

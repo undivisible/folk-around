@@ -2,7 +2,9 @@ use std::process;
 use std::sync::Arc;
 
 use folk_computer_use::register_tools;
-use folk_core::{AccessMode, AppConfig, generate_pairing_code, load_config, save_config};
+use folk_core::{
+    AccessMode, AppConfig, generate_pairing_code, load_config, log_status, save_config,
+};
 use folk_mcp::ToolTable;
 use folk_transport::{run_http, run_stdio, start_p2p};
 
@@ -22,6 +24,7 @@ struct Cli {
 }
 
 fn main() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
     if let Err(err) = run() {
         log_status(&err.to_string());
         process::exit(1);
@@ -168,22 +171,6 @@ fn print_pairing_instructions(signal_url: &str, room: &str, port: u16) {
     ));
     log_status(&format!("Local MCP endpoint: http://127.0.0.1:{port}/sse"));
     log_status("Waiting for peer...");
-}
-
-fn log_status(message: &str) {
-    let now = terminal_time();
-    eprintln!("[{now}] {message}");
-}
-
-fn terminal_time() -> String {
-    let seconds = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_secs() % 86_400)
-        .unwrap_or(0);
-    let hour = seconds / 3_600;
-    let minute = (seconds % 3_600) / 60;
-    let second = seconds % 60;
-    format!("{hour:02}:{minute:02}:{second:02}")
 }
 
 fn print_help() {

@@ -1,12 +1,13 @@
+use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::thread;
 use std::time::Duration;
 
 use base64::Engine;
-use chacha20poly1305::aead::{Aead, KeyInit};
+use chacha20poly1305::aead::{AeadInPlace, KeyInit};
 use chacha20poly1305::{Key, XChaCha20Poly1305, XNonce};
 use folk_mcp::{ToolTable, handle_message};
 use hkdf::Hkdf;
@@ -18,13 +19,13 @@ use tungstenite::Message;
 use tungstenite::client::IntoClientRequest;
 use url::Url;
 
-const RELAY_AD: &[u8] = b"folk-around p2p relay v1";
+const RELAY_KDF_INFO: &[u8] = b"folk-around p2p relay v1";
 const MAX_HTTP_HEADER_BYTES: usize = 64 * 1024;
 const MAX_HTTP_BODY_BYTES: usize = 1024 * 1024;
 const MAX_SSE_CLIENTS: usize = 32;
 const HTTP_READ_TIMEOUT: Duration = Duration::from_secs(10);
 const HTTP_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
-static SSE_CLIENTS: AtomicUsize = AtomicUsize::new(0);
+static SSE_CLIENTS: AtomicU32 = AtomicU32::new(0);
 
 #[derive(Debug, Error)]
 pub enum TransportError {
@@ -259,7 +260,7 @@ fn handle_http_post(
 }
 
 fn send_sse(mut stream: TcpStream) -> Result<(), TransportError> {
-    let Some(_slot) = SseSlot::new() else {
+    if !acquire_sse_slot() {
         send_response(
             &mut stream,
             503,
@@ -268,7 +269,13 @@ fn send_sse(mut stream: TcpStream) -> Result<(), TransportError> {
             b"too many sse clients",
         )?;
         return Ok(());
-    };
+    }
+    let result = send_sse_inner(&mut stream);
+    release_sse_slot();
+    result
+}
+
+fn send_sse_inner(stream: &mut TcpStream) -> Result<(), TransportError> {
     stream.write_all(b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\naccess-control-allow-origin: *\r\naccess-control-allow-headers: content-type\r\naccess-control-allow-methods: GET, POST, OPTIONS\r\nconnection: keep-alive\r\n\r\n")?;
     stream.write_all(b"event: endpoint\ndata: /message\n\n")?;
     stream.flush()?;
@@ -300,32 +307,18 @@ fn send_response(
     Ok(())
 }
 
-struct SseSlot;
-
-impl SseSlot {
-    fn new() -> Option<Self> {
-        let mut current = SSE_CLIENTS.load(Ordering::Relaxed);
-        loop {
-            if current >= MAX_SSE_CLIENTS {
-                return None;
-            }
-            match SSE_CLIENTS.compare_exchange_weak(
-                current,
-                current + 1,
-                Ordering::AcqRel,
-                Ordering::Relaxed,
-            ) {
-                Ok(_) => return Some(Self),
-                Err(next) => current = next,
-            }
-        }
+fn acquire_sse_slot() -> bool {
+    let prev = SSE_CLIENTS.fetch_add(1, Ordering::AcqRel);
+    if prev >= MAX_SSE_CLIENTS as u32 {
+        SSE_CLIENTS.fetch_sub(1, Ordering::AcqRel);
+        false
+    } else {
+        true
     }
 }
 
-impl Drop for SseSlot {
-    fn drop(&mut self) {
-        SSE_CLIENTS.fetch_sub(1, Ordering::AcqRel);
-    }
+fn release_sse_slot() {
+    SSE_CLIENTS.fetch_sub(1, Ordering::AcqRel);
 }
 
 fn header_end(request: &[u8]) -> Option<(usize, usize)> {
@@ -354,6 +347,12 @@ fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
         .position(|window| window == needle)
 }
 
+struct Session {
+    key: [u8; 32],
+    rx_seqno: u64,
+    tx_seqno: u64,
+}
+
 struct P2PManager {
     verbose: bool,
     table: Arc<ToolTable>,
@@ -361,8 +360,7 @@ struct P2PManager {
     room: String,
     identity_public: [u8; 32],
     identity_secret: [u8; 32],
-    session_key: Option<[u8; 32]>,
-    peer_identity: Option<String>,
+    sessions: HashMap<String, Session>,
 }
 
 impl P2PManager {
@@ -377,8 +375,7 @@ impl P2PManager {
             room,
             identity_public: public,
             identity_secret: secret,
-            session_key: None,
-            peer_identity: None,
+            sessions: HashMap::new(),
         }
     }
 
@@ -466,7 +463,6 @@ impl P2PManager {
         socket: &mut tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<TcpStream>>,
         peer: &str,
     ) -> Result<(), TransportError> {
-        self.peer_identity = Some(peer.to_string());
         let from = hex::encode(self.identity_public);
         socket.send(Message::Text(
             json!({"type":"offer","from":from,"to":peer,"data":{"type":"mcp_relay"}})
@@ -508,10 +504,10 @@ impl P2PManager {
         if self.verbose {
             log_status(&format!("relay from {from}"));
         }
-        let mcp_json = self.decrypt_relay_data(data)?;
+        let mcp_json = self.decrypt_relay_data(from, data)?;
         let msg: Value = serde_json::from_str(&mcp_json)?;
         if let Some(resp) = handle_message(self.verbose, &self.table, msg)? {
-            let encrypted = self.encrypt_relay_payload(resp.as_bytes())?;
+            let encrypted = self.encrypt_relay_payload(from, resp.as_bytes())?;
             let from_id = hex::encode(self.identity_public);
             socket.send(Message::Text(
                 json!({"type":"relay","from":from_id,"to":from,"data":encrypted})
@@ -535,30 +531,55 @@ impl P2PManager {
         }
         let hk = Hkdf::<Sha256>::new(Some(&salt), &shared);
         let mut key = [0_u8; 32];
-        hk.expand(RELAY_AD, &mut key)
+        hk.expand(RELAY_KDF_INFO, &mut key)
             .map_err(|_| TransportError::Crypto)?;
-        self.session_key = Some(key);
-        self.peer_identity = Some(peer.to_string());
+        self.sessions.entry(peer.to_string()).or_insert(Session {
+            key,
+            rx_seqno: 0,
+            tx_seqno: 0,
+        });
         Ok(())
     }
 
-    fn encrypt_relay_payload(&self, plaintext: &[u8]) -> Result<Value, TransportError> {
-        let key = self.session_key.ok_or(TransportError::HandshakeRequired)?;
+    fn encrypt_relay_payload(
+        &mut self,
+        peer: &str,
+        plaintext: &[u8],
+    ) -> Result<Value, TransportError> {
+        let session = self
+            .sessions
+            .get_mut(peer)
+            .ok_or(TransportError::HandshakeRequired)?;
+        let key = session.key;
         let cipher = XChaCha20Poly1305::new(Key::from_slice(&key));
         let mut nonce = [0_u8; 24];
         rand::rng().fill_bytes(&mut nonce);
-        let ciphertext = cipher
-            .encrypt(XNonce::from_slice(&nonce), plaintext)
+
+        let seqno = session.tx_seqno;
+        session.tx_seqno += 1;
+
+        // ponytail: seqno prefix prevents replay; wraps at 2^64 (never)
+        let mut buffer = Vec::with_capacity(8 + plaintext.len());
+        buffer.extend_from_slice(&seqno.to_be_bytes());
+        buffer.extend_from_slice(plaintext);
+
+        // bind sender + recipient identities as AEAD associated data
+        let from_hex = hex::encode(self.identity_public);
+        let ad = make_relay_ad(&from_hex, peer);
+
+        cipher
+            .encrypt_in_place(XNonce::from_slice(&nonce), &ad, &mut buffer)
             .map_err(|_| TransportError::Crypto)?;
+
         Ok(json!({
             "v": 1,
             "alg": "xchacha20poly1305",
             "nonce": hex::encode(nonce),
-            "ciphertext": hex::encode(ciphertext)
+            "ciphertext": hex::encode(buffer)
         }))
     }
 
-    fn decrypt_relay_data(&self, data: &Value) -> Result<String, TransportError> {
+    fn decrypt_relay_data(&mut self, from: &str, data: &Value) -> Result<String, TransportError> {
         let encrypted = if let Some(text) = data.as_str() {
             serde_json::from_str::<Value>(text)?
         } else {
@@ -587,36 +608,55 @@ impl P2PManager {
         if nonce.len() != 24 {
             return Err(TransportError::InvalidEncryptedPayload);
         }
-        let key = self.session_key.ok_or(TransportError::HandshakeRequired)?;
+
+        let session = self
+            .sessions
+            .get_mut(from)
+            .ok_or(TransportError::HandshakeRequired)?;
+        let key = session.key;
         let cipher = XChaCha20Poly1305::new(Key::from_slice(&key));
-        let plaintext = cipher
-            .decrypt(XNonce::from_slice(&nonce), ciphertext.as_ref())
+
+        let to_hex = hex::encode(self.identity_public);
+        let ad = make_relay_ad(from, &to_hex);
+
+        let mut buffer = ciphertext;
+        cipher
+            .decrypt_in_place(XNonce::from_slice(&nonce), &ad, &mut buffer)
             .map_err(|_| TransportError::Crypto)?;
-        String::from_utf8(plaintext).map_err(|_| TransportError::InvalidEncryptedPayload)
+
+        // anti-replay: first 8 bytes are big-endian seqno
+        if buffer.len() < 8 {
+            return Err(TransportError::InvalidEncryptedPayload);
+        }
+        let seqno = u64::from_be_bytes(buffer[..8].try_into().unwrap());
+        if seqno <= session.rx_seqno {
+            return Err(TransportError::InvalidEncryptedPayload);
+        }
+        session.rx_seqno = seqno;
+
+        String::from_utf8(buffer[8..].to_vec()).map_err(|_| TransportError::InvalidEncryptedPayload)
     }
 
     fn ensure_relay_sender(&self, from: &str) -> Result<(), TransportError> {
-        match self.peer_identity.as_deref() {
-            Some(peer) if peer == from => Ok(()),
-            _ => Err(TransportError::InvalidPeerIdentity),
+        if self.sessions.contains_key(from) {
+            Ok(())
+        } else {
+            Err(TransportError::InvalidPeerIdentity)
         }
     }
 }
 
-fn log_status(message: &str) {
-    let now = terminal_time();
-    eprintln!("[{now}] {message}");
+fn make_relay_ad(from: &str, to: &str) -> Vec<u8> {
+    let mut ad = Vec::with_capacity(64 + from.len() + to.len());
+    ad.extend_from_slice(b"folk-around p2p relay\nfrom=");
+    ad.extend_from_slice(from.as_bytes());
+    ad.extend_from_slice(b"\nto=");
+    ad.extend_from_slice(to.as_bytes());
+    ad
 }
 
-fn terminal_time() -> String {
-    let seconds = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_secs() % 86_400)
-        .unwrap_or(0);
-    let hour = seconds / 3_600;
-    let minute = (seconds % 3_600) / 60;
-    let second = seconds % 60;
-    format!("{hour:02}:{minute:02}:{second:02}")
+fn log_status(message: &str) {
+    folk_core::log_status(message);
 }
 
 fn http_bind_addr(port: u16) -> (&'static str, u16) {
@@ -733,11 +773,17 @@ mod tests {
 
     #[test]
     fn sse_slot_should_enforce_connection_limit() {
-        let slots = (0..MAX_SSE_CLIENTS)
-            .map(|_| SseSlot::new().unwrap())
-            .collect::<Vec<_>>();
-        assert!(SseSlot::new().is_none());
-        drop(slots);
-        assert!(SseSlot::new().is_some());
+        // acquire to the limit
+        for _ in 0..MAX_SSE_CLIENTS {
+            assert!(acquire_sse_slot());
+        }
+        assert!(!acquire_sse_slot());
+        // release one
+        release_sse_slot();
+        assert!(acquire_sse_slot());
+        // clean up
+        for _ in 0..MAX_SSE_CLIENTS {
+            release_sse_slot();
+        }
     }
 }

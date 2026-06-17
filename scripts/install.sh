@@ -3,10 +3,12 @@ set -euo pipefail
 
 REPO="undivisible/folk-around"
 BIN="${FOLK_AROUND_BIN:-/usr/local/bin/folk-around}"
-VERSION="${1:-v0.3.2}"
+VERSION="${1:-v0.3.4}"
 
 case "$VERSION" in
-  0.3.2|latest) VERSION="v0.3.2" ;;
+  0.3.4|latest) VERSION="v0.3.4" ;;
+  0.3.3) VERSION="v0.3.3" ;;
+  0.3.2) VERSION="v0.3.2" ;;
   0.3.1) VERSION="v0.3.1" ;;
   0.3.0) VERSION="v0.3.0" ;;
 esac

@@ -384,6 +384,7 @@ dependencies = [
  "folk-core",
  "folk-mcp",
  "folk-transport",
+ "rustls",
  "serde_json",
 ]
 

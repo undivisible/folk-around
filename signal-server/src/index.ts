@@ -29,6 +29,9 @@ export interface Env {
 
 const identityPattern = /^[0-9a-f]{64}$/i;
 const maxMessageBytes = 256 * 1024;
+const identityGracePeriodMs = 5_000;
+const relayRateLimitWindowMs = 1_000;
+const maxRelayPerWindow = 60;
 
 function isIdentity(value: unknown): value is string {
   return typeof value === "string" && identityPattern.test(value);
@@ -88,8 +91,9 @@ function fallbackHomePage(): Response {
 /// Durable Object that manages one signaling room.
 /// All WebSocket connections to this room route through this DO.
 export class SignalRoom implements DurableObject {
-  private peers = new Map<string, WebSocket>();
+  private peers = new Map<string, { ws: WebSocket; joinedAt: number }>();
   private sockets = new Map<WebSocket, string>();
+  private rateLimit = new Map<string, { count: number; resetAt: number }>();
 
   async fetch(request: Request): Promise<Response> {
     const pair = new WebSocketPair();
@@ -109,13 +113,16 @@ export class SignalRoom implements DurableObject {
     });
 
     server.addEventListener("close", () => {
-      // Find and remove this peer
       const identity = this.sockets.get(server);
-      if (identity && this.peers.get(identity) === server) {
-        this.peers.delete(identity);
-        this.broadcast({ type: "peer_left", identity }, server);
+      if (identity) {
+        const entry = this.peers.get(identity);
+        if (entry && entry.ws === server) {
+          this.peers.delete(identity);
+          this.broadcast({ type: "peer_left", identity }, server);
+        }
       }
       this.sockets.delete(server);
+      this.rateLimit.delete(server as unknown as string); // clean rate limit entry
     });
 
     return new Response(null, { status: 101, webSocket: client });
@@ -132,17 +139,26 @@ export class SignalRoom implements DurableObject {
           return;
         }
 
-        const existingPeer = this.peers.get(identity);
-        if (existingPeer && existingPeer !== server) {
-          existingPeer.close(1000, "Replaced by newer connection");
-          this.sockets.delete(existingPeer);
+        const existingEntry = this.peers.get(identity);
+        if (existingEntry && existingEntry.ws !== server) {
+          // Grace period: if the existing connection is recent, reject the new one
+          if (Date.now() - existingEntry.joinedAt < identityGracePeriodMs) {
+            server.send(
+              JSON.stringify({
+                type: "error",
+                message: "Identity recently joined, try later",
+              }),
+            );
+            server.close(1008, "Identity recently joined");
+            return;
+          }
+          existingEntry.ws.close(1000, "Replaced by newer connection");
+          this.sockets.delete(existingEntry.ws);
         }
 
-        // Store peer
-        this.peers.set(identity, server);
+        this.peers.set(identity, { ws: server, joinedAt: Date.now() });
         this.sockets.set(server, identity);
 
-        // Confirm join with current peer list
         const peerList = Array.from(this.peers.keys()).filter(
           (id) => id !== identity,
         );
@@ -150,7 +166,6 @@ export class SignalRoom implements DurableObject {
           JSON.stringify({ type: "joined", room: "", peers: peerList }),
         );
 
-        // Notify other peers
         this.broadcast({ type: "peer_joined", identity }, server);
         break;
       }
@@ -170,9 +185,9 @@ export class SignalRoom implements DurableObject {
           );
           return;
         }
-        const targetPeer = this.peers.get(msg.to);
-        if (targetPeer) {
-          targetPeer.send(
+        const targetEntry = this.peers.get(msg.to);
+        if (targetEntry) {
+          targetEntry.ws.send(
             JSON.stringify({
               type: msg.type,
               from: msg.from,
@@ -185,6 +200,7 @@ export class SignalRoom implements DurableObject {
 
       case "relay": {
         if (!this.isSender(server, msg.from)) return;
+        if (!this.checkRateLimit(server)) return;
         if (!isIdentity(msg.from) || !isIdentity(msg.to)) {
           server.send(
             JSON.stringify({ type: "error", message: "Invalid peer identity" }),
@@ -197,10 +213,9 @@ export class SignalRoom implements DurableObject {
           );
           return;
         }
-        // Relay encrypted data to a specific peer (NAT fallback)
-        const targetPeer = this.peers.get(msg.to);
-        if (targetPeer) {
-          targetPeer.send(
+        const targetEntry = this.peers.get(msg.to);
+        if (targetEntry) {
+          targetEntry.ws.send(
             JSON.stringify({
               type: "relay",
               from: msg.from,
@@ -236,10 +251,28 @@ export class SignalRoom implements DurableObject {
     return true;
   }
 
+  private checkRateLimit(server: WebSocket): boolean {
+    const key = this.sockets.get(server) || server as unknown as string;
+    const now = Date.now();
+    let entry = this.rateLimit.get(key);
+    if (!entry || now >= entry.resetAt) {
+      entry = { count: 0, resetAt: now + relayRateLimitWindowMs };
+      this.rateLimit.set(key, entry);
+    }
+    entry.count++;
+    if (entry.count > maxRelayPerWindow) {
+      server.send(
+        JSON.stringify({ type: "error", message: "Rate limit exceeded" }),
+      );
+      return false;
+    }
+    return true;
+  }
+
   private broadcast(msg: any, exclude?: WebSocket) {
-    for (const [, ws] of this.peers) {
-      if (ws !== exclude) {
-        ws.send(JSON.stringify(msg));
+    for (const [, entry] of this.peers) {
+      if (entry.ws !== exclude) {
+        entry.ws.send(JSON.stringify(msg));
       }
     }
   }

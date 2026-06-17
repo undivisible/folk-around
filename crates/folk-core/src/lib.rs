@@ -5,6 +5,22 @@ use std::path::PathBuf;
 use rand::Rng;
 use thiserror::Error;
 
+pub fn terminal_time() -> String {
+    let seconds = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs() % 86_400)
+        .unwrap_or(0);
+    let hour = seconds / 3_600;
+    let minute = (seconds % 3_600) / 60;
+    let second = seconds % 60;
+    format!("{hour:02}:{minute:02}:{second:02}")
+}
+
+pub fn log_status(message: &str) {
+    let now = terminal_time();
+    eprintln!("[{now}] {message}");
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AccessMode {
     Full,
@@ -108,16 +124,7 @@ pub fn save_config(config: &AppConfig) -> Result<(), ConfigError> {
 }
 
 pub fn generate_pairing_code() -> String {
-    const WORDS: [&str; 16] = [
-        "amber", "cedar", "copper", "delta", "ember", "harbor", "indigo", "juno", "maple", "nova",
-        "orbit", "pixel", "quartz", "river", "signal", "violet",
-    ];
-    let number = rand::rng().random::<u64>();
-    format!(
-        "{}-{:04}",
-        WORDS[number as usize % WORDS.len()],
-        number % 10000
-    )
+    format!("{:016x}", rand::rng().random::<u64>())
 }
 
 fn config_dir() -> Result<PathBuf, ConfigError> {
@@ -142,13 +149,9 @@ mod tests {
     }
 
     #[test]
-    fn pairing_code_should_have_word_and_four_digits() {
+    fn pairing_code_should_be_hex_16_chars() {
         let code = generate_pairing_code();
-        let Some((word, number)) = code.split_once('-') else {
-            panic!("pairing code missing hyphen");
-        };
-        assert!(word.len() >= 4);
-        assert_eq!(number.len(), 4);
-        assert!(number.chars().all(|ch| ch.is_ascii_digit()));
+        assert_eq!(code.len(), 16);
+        assert!(code.chars().all(|ch| ch.is_ascii_hexdigit()));
     }
 }
