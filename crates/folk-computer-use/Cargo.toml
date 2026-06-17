@@ -7,8 +7,8 @@ repository.workspace = true
 
 [dependencies]
 base64.workspace = true
-folk-core = { path = "../folk-core" }
-folk-mcp = { path = "../folk-mcp" }
+folk-core = { path = "../folk-core", version = "0.3.4" }
+folk-mcp = { path = "../folk-mcp", version = "0.3.4" }
 rs_peekaboo.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

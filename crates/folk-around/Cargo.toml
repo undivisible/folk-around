@@ -10,9 +10,9 @@ name = "folk-around"
 path = "src/main.rs"
 
 [dependencies]
-folk-computer-use = { path = "../folk-computer-use" }
-folk-core = { path = "../folk-core" }
-folk-mcp = { path = "../folk-mcp" }
-folk-transport = { path = "../folk-transport" }
+folk-computer-use = { path = "../folk-computer-use", version = "0.3.4" }
+folk-core = { path = "../folk-core", version = "0.3.4" }
+folk-mcp = { path = "../folk-mcp", version = "0.3.4" }
+folk-transport = { path = "../folk-transport", version = "0.3.4" }
 rustls.workspace = true
 serde_json.workspace = true
