@@ -74,10 +74,14 @@ The last signaling server, pairing code, HTTP port, and mode are saved under `~/
 
 ## install
 
-### homebrew
+### wax / homebrew
 ```bash
-brew tap undivisible/homebrew-tap
-brew install folk-around
+wax tap undivisible/homebrew-tap
+wax install folk-around
+
+# or with brew:
+# brew tap undivisible/homebrew-tap
+# brew install folk-around
 ```
 
 ### one-liner
