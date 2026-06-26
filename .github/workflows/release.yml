@@ -71,9 +71,7 @@ jobs:
           - os: macos-latest
             target: aarch64-apple-darwin
             asset: folk-around-darwin-aarch64
-          - os: macos-13
-            target: x86_64-apple-darwin
-            asset: folk-around-darwin-x86_64
+          # macos-13 (Intel) removed — arm64 binary works on Intel via Rosetta 2
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             asset: folk-around-linux-x86_64
@@ -123,8 +121,6 @@ jobs:
           files: |
             dist/folk-around-darwin-aarch64
             dist/folk-around-darwin-aarch64.sha256
-            dist/folk-around-darwin-x86_64
-            dist/folk-around-darwin-x86_64.sha256
             dist/folk-around-linux-x86_64
             dist/folk-around-linux-x86_64.sha256
             dist/folk-around-linux-aarch64
