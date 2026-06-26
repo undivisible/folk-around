@@ -337,7 +337,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -852,9 +852,9 @@ dependencies = [
 
 [[package]]
 name = "rs_peekaboo"
-version = "0.3.0"
+version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a0442633a377fbd1f0a8637de939fd0d62fece71e286c63ebfd7093254cb969f"
+checksum = "529ded5ade3efe4bf4cd8a92fd7b6b39393250f6ffefe988d2de5141fbbe1d1d"
 dependencies = [
  "clap",
  "clap_complete",
@@ -885,7 +885,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1099,7 +1099,7 @@ dependencies = [
  "getrandom 0.3.4",
  "once_cell",
  "rustix",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
