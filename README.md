@@ -74,11 +74,24 @@ The last signaling server, pairing code, HTTP port, and mode are saved under `~/
 
 ## install
 
+### homebrew
 ```bash
-# one-liner
-curl -fsSL https://raw.githubusercontent.com/undivisible/folk-around/main/scripts/install.sh | bash
+brew tap undivisible/homebrew-tap
+brew install folk-around
+```
 
-# or build from source
+### one-liner
+```bash
+curl -fsSL https://raw.githubusercontent.com/undivisible/folk-around/main/scripts/install.sh | bash
+```
+
+### cargo
+```bash
+cargo install folk-around
+```
+
+### from source
+```bash
 git clone https://github.com/undivisible/folk-around
 cd folk-around
 cargo build --release
