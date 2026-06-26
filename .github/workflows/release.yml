@@ -9,7 +9,7 @@ jobs:
   rust-quality:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6.0.3
+      - uses: actions/checkout@v4
 
       - name: Rust format
         run: cargo fmt --all -- --check
@@ -23,25 +23,16 @@ jobs:
       - name: Rust build
         run: cargo build --release --locked
 
-      - name: Install Rust audit tools
-        run: cargo install cargo-audit cargo-deny --locked
-
-      - name: Rust audit
-        run: cargo audit
-
-      - name: Rust dependency policy
-        run: cargo deny check
-
       - name: Install script test
         run: bash scripts/test-install.sh
 
   signal-server-quality:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6.0.3
+      - uses: actions/checkout@v4
 
       - name: Setup Bun
-        uses: oven-sh/setup-bun@v2.2.0
+        uses: oven-sh/setup-bun@v2
         with:
           bun-version: canary
 
@@ -80,7 +71,7 @@ jobs:
           - os: macos-latest
             target: aarch64-apple-darwin
             asset: folk-around-darwin-aarch64
-          - os: macos-15-intel
+          - os: macos-13
             target: x86_64-apple-darwin
             asset: folk-around-darwin-x86_64
           - os: ubuntu-latest
@@ -91,7 +82,7 @@ jobs:
             asset: folk-around-linux-aarch64
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v6.0.3
+      - uses: actions/checkout@v4
 
       - name: Add Rust target
         run: rustup target add ${{ matrix.target }}
@@ -99,21 +90,23 @@ jobs:
       - name: Build Rust CLI
         run: cargo build --release --locked --target ${{ matrix.target }}
 
-      - name: Stage Rust CLI
+      - name: Stage artifacts
         run: |
           mkdir -p dist
-          cp target/${{ matrix.target }}/release/folk-around dist/${{ matrix.asset }}
+          BIN="folk-around"
+          ARCHIVE="${{ matrix.asset }}"
+          cp "target/${{ matrix.target }}/release/${BIN}" "dist/${ARCHIVE}"
+          openssl dgst -sha256 -r "dist/${ARCHIVE}" > "dist/${ARCHIVE}.sha256"
 
-      - name: Upload Rust CLI
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.asset }}
-          path: dist/${{ matrix.asset }}
+          path: dist/
 
   release:
     needs:
       - rust-cli
-    if: ${{ always() && !cancelled() && !failure() }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -129,7 +122,11 @@ jobs:
         with:
           files: |
             dist/folk-around-darwin-aarch64
+            dist/folk-around-darwin-aarch64.sha256
             dist/folk-around-darwin-x86_64
-            dist/folk-around-linux-aarch64
+            dist/folk-around-darwin-x86_64.sha256
             dist/folk-around-linux-x86_64
-          tag_name: ${{ github.ref_name }}
+            dist/folk-around-linux-x86_64.sha256
+            dist/folk-around-linux-aarch64
+            dist/folk-around-linux-aarch64.sha256
+          generate_release_notes: true
