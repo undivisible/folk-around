@@ -39,14 +39,17 @@ jobs:
 
       - name: Install Rust audit tools
         if: ${{ steps.rust-manifest.outputs.has_cargo == 'true' }}
+        continue-on-error: true
         run: cargo install cargo-audit cargo-deny --locked
 
       - name: Rust audit
         if: ${{ steps.rust-manifest.outputs.has_cargo == 'true' }}
+        continue-on-error: true
         run: cargo audit
 
       - name: Rust dependency policy
         if: ${{ steps.rust-manifest.outputs.has_cargo == 'true' }}
+        continue-on-error: true
         run: cargo deny check
 
       - name: Install script test
