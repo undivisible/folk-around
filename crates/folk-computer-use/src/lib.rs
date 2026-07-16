@@ -8,7 +8,7 @@ use folk_mcp::{
     object_schema, string_property, text_result,
 };
 use rs_peekaboo::automation::{Target, parse_point, validate_output_path};
-use rs_peekaboo::{Bounds, Direction, ImageCapture, ImageMode, Peekaboo, Point, Snapshot};
+use rs_peekaboo::{Bounds, Direction, ImageCapture, ImageMode, Peekaboo, PeekabooConfig, Point};
 use serde_json::{Value, json};
 use thiserror::Error;
 
@@ -33,6 +33,13 @@ enum ToolExecError {
     Peekaboo(#[from] rs_peekaboo::PeekabooError),
     #[error("{0}")]
     Json(#[from] serde_json::Error),
+}
+
+fn peekaboo() -> Peekaboo {
+    Peekaboo::with_config(PeekabooConfig {
+        background: true,
+        ..PeekabooConfig::default()
+    })
 }
 
 pub fn register_tools(table: &mut ToolTable) {
@@ -95,6 +102,10 @@ pub fn register_tools(table: &mut ToolTable) {
                     string_property("Output path on the Folk Around host computer"),
                 ),
                 ("retina", bool_property("Capture at retina scale")),
+                (
+                    "app",
+                    string_property("Optional app name for window-scoped capture"),
+                ),
             ],
             &[],
         ),
@@ -154,6 +165,12 @@ pub fn register_tools(table: &mut ToolTable) {
         |args, _| Ok(permissions(args)),
     );
     table.register(
+        "folk_doctor",
+        "Health report for computer-use readiness on the Folk Around host computer",
+        empty_schema(),
+        |_, _| Ok(doctor()),
+    );
+    table.register(
         "folk_screen_capture",
         "Capture the Folk Around host computer screen and return image metadata",
         schema(
@@ -191,6 +208,10 @@ pub fn register_tools(table: &mut ToolTable) {
                     string_property("Stable element ID from folk_ui_snapshot"),
                 ),
                 (
+                    "index",
+                    number_property("Stable snapshot element index from folk_see"),
+                ),
+                (
                     "snapshot",
                     string_property("Optional snapshot id from folk_ui_snapshot"),
                 ),
@@ -198,6 +219,10 @@ pub fn register_tools(table: &mut ToolTable) {
                 ("y", number_property("Screen y coordinate")),
                 ("button", string_property("Mouse button: left or right")),
                 ("count", number_property("Click count")),
+                (
+                    "background",
+                    bool_property("Prefer AX/background click without focus steal"),
+                ),
             ],
             &[],
         ),
@@ -524,7 +549,7 @@ fn spawn_command(args: Value, mode: AccessMode) -> Value {
 
 fn clipboard_read() -> Value {
     flatten(
-        Peekaboo::new()
+        peekaboo()
             .clipboard_read()
             .map(|text| {
                 if text.is_empty() {
@@ -540,10 +565,19 @@ fn clipboard_read() -> Value {
 fn clipboard_write(args: Value) -> Value {
     let result = (|| {
         let text = str_arg(&args, "text").ok_or(ToolExecError::Missing("text"))?;
-        Peekaboo::new().clipboard_write(text)?;
+        peekaboo().clipboard_write(text)?;
         Ok(text_result("copied to clipboard"))
     })();
     flatten(result)
+}
+
+fn doctor() -> Value {
+    flatten(
+        peekaboo()
+            .doctor()
+            .map(|value| json_text_result(&value))
+            .map_err(ToolExecError::from),
+    )
 }
 
 fn screen_capture(args: Value, _mode: AccessMode) -> Value {
@@ -558,7 +592,7 @@ fn screen_capture(args: Value, _mode: AccessMode) -> Value {
             let width = int_arg(&args, "width").unwrap_or(0);
             let height = int_arg(&args, "height").unwrap_or(0);
             if width > 0 && height > 0 {
-                Peekaboo::new().image_region(
+                peekaboo().image_region(
                     Bounds {
                         x,
                         y,
@@ -569,12 +603,12 @@ fn screen_capture(args: Value, _mode: AccessMode) -> Value {
                     true,
                 )?
             } else {
-                Peekaboo::new().image(ImageMode::Screen, path, true)?
+                peekaboo().image(ImageMode::Screen, path, true)?
             }
         } else if target == "window" {
-            Peekaboo::new().image(ImageMode::Window, path, true)?
+            peekaboo().image(ImageMode::Window, path, true)?
         } else {
-            Peekaboo::new().image(ImageMode::Screen, path, true)?
+            peekaboo().image(ImageMode::Screen, path, true)?
         };
         let metadata = json!({
             "path": capture.path,
@@ -590,10 +624,15 @@ fn screen_capture(args: Value, _mode: AccessMode) -> Value {
 
 fn image(args: Value, _mode: AccessMode) -> Value {
     let result = (|| {
-        let capture_mode = ImageMode::parse_or_err(str_arg(&args, "mode").unwrap_or("screen"))?;
         let path = optional_output_path(&args)?;
         let retina = args.get("retina").and_then(Value::as_bool).unwrap_or(true);
-        let capture = Peekaboo::new().image(capture_mode, path, retina)?;
+        let capture = if let Some(app) = str_arg(&args, "app") {
+            peekaboo().image_app(app, path, retina)?
+        } else {
+            let capture_mode =
+                ImageMode::parse_or_err(str_arg(&args, "mode").unwrap_or("screen"))?;
+            peekaboo().image(capture_mode, path, retina)?
+        };
         let metadata = json!({
             "path": capture.path,
             "mimeType": capture.mime_type,
@@ -612,41 +651,52 @@ fn see(args: Value, _mode: AccessMode) -> Value {
         let capture_mode = ImageMode::parse_or_err(str_arg(&args, "mode").unwrap_or("screen"))?;
         let path = optional_output_path(&args)?;
         let retina = args.get("retina").and_then(Value::as_bool).unwrap_or(true);
-        let peekaboo = Peekaboo::new();
-        let capture = peekaboo.image(capture_mode, path, retina)?;
-        let snapshot_id = rs_peekaboo::cache::new_snapshot_id();
-        let snapshot = Snapshot {
-            snapshot_id,
-            elements: peekaboo.ui_elements(app)?,
+        // see() assigns stable element indices.
+        let snapshot = peekaboo().see(app, capture_mode, path.clone(), retina)?;
+        let capture = if path.is_some() {
+            None
+        } else {
+            // see may skip writing image when path is None; still try one capture for image payload.
+            Some(peekaboo().image(capture_mode, None, retina)?)
         };
-        rs_peekaboo::cache::save_snapshot(&snapshot)?;
-        let metadata = json!({
-            "snapshotId": snapshot.snapshot_id,
-            "elements": snapshot.elements,
-            "image": {
-                "path": capture.path,
-                "mimeType": capture.mime_type,
-                "bytes": capture.bytes,
-                "mode": capture.mode,
-                "ephemeral": capture.ephemeral,
-            }
-        });
-        image_result(metadata, &capture)
+        let metadata = if let Some(capture) = capture.as_ref() {
+            json!({
+                "snapshotId": snapshot.snapshot_id,
+                "elements": snapshot.elements,
+                "image": {
+                    "path": capture.path,
+                    "mimeType": capture.mime_type,
+                    "bytes": capture.bytes,
+                    "mode": capture.mode,
+                    "ephemeral": capture.ephemeral,
+                }
+            })
+        } else {
+            json!({
+                "snapshotId": snapshot.snapshot_id,
+                "elements": snapshot.elements,
+            })
+        };
+        if let Some(capture) = capture.as_ref() {
+            image_result(metadata, capture)
+        } else {
+            Ok(json_text_result(&metadata))
+        }
     })();
     flatten(result)
 }
 
 fn list_screens(_mode: AccessMode) -> Value {
-    let result = (|| Ok(json_text_result(&Peekaboo::new().list_screens()?)))();
+    let result = (|| Ok(json_text_result(&peekaboo().list_screens()?)))();
     flatten(result)
 }
 
 fn permissions(args: Value) -> Value {
     let result: Result<Value, ToolExecError> = (|| {
         if str_arg(&args, "action") == Some("grant") {
-            Ok(Peekaboo::new().grant_permissions()?)
+            Ok(peekaboo().grant_permissions()?)
         } else {
-            Ok(Peekaboo::new().permissions())
+            Ok(peekaboo().permissions())
         }
     })();
     match result {
@@ -657,7 +707,7 @@ fn permissions(args: Value) -> Value {
 
 fn ui_snapshot(_mode: AccessMode) -> Value {
     let result = (|| {
-        let elements = serde_json::to_value(Peekaboo::new().ui_elements(None)?)?;
+        let elements = serde_json::to_value(peekaboo().ui_elements(None)?)?;
         Ok(json_text_result(&json!({
             "platform": "macos",
             "elements": elements
@@ -669,7 +719,12 @@ fn ui_snapshot(_mode: AccessMode) -> Value {
 fn click(args: Value, mode: AccessMode) -> Value {
     let result = (|| {
         ensure_mutation(mode)?;
-        let target = if let Some(element_id) = str_arg(&args, "element_id") {
+        let target = if let Some(index) = int_arg(&args, "index") {
+            Target::Query {
+                query: format!("index={index}"),
+                snapshot: str_arg(&args, "snapshot").map(str::to_string),
+            }
+        } else if let Some(element_id) = str_arg(&args, "element_id") {
             Target::Query {
                 query: element_id.to_string(),
                 snapshot: str_arg(&args, "snapshot").map(str::to_string),
@@ -682,7 +737,11 @@ fn click(args: Value, mode: AccessMode) -> Value {
         };
         let button = str_arg(&args, "button").unwrap_or("left");
         let count = int_arg(&args, "count").unwrap_or(1).max(1) as u32;
-        Peekaboo::new().click(target, button, count)?;
+        let background = args
+            .get("background")
+            .and_then(Value::as_bool)
+            .unwrap_or(true);
+        peekaboo().click_with_options(target, button, count, background)?;
         Ok(text_result("clicked"))
     })();
     flatten(result)
@@ -695,7 +754,7 @@ fn type_text(args: Value, mode: AccessMode) -> Value {
         let clear = args.get("clear").and_then(Value::as_bool).unwrap_or(false);
         let press_return = args.get("return").and_then(Value::as_bool).unwrap_or(false);
         let delay_ms = args.get("delay_ms").and_then(Value::as_u64);
-        Peekaboo::new().type_text(text, clear, press_return, delay_ms, str_arg(&args, "app"))?;
+        peekaboo().type_text(text, clear, press_return, delay_ms, str_arg(&args, "app"))?;
         Ok(text_result("typed"))
     })();
     flatten(result)
@@ -707,7 +766,7 @@ fn press(args: Value, mode: AccessMode) -> Value {
         let key = str_arg(&args, "key").ok_or(ToolExecError::Missing("key"))?;
         let count = int_arg(&args, "count").unwrap_or(1).max(1) as u32;
         let delay_ms = args.get("delay_ms").and_then(Value::as_u64);
-        Peekaboo::new().press(key, count, delay_ms)?;
+        peekaboo().press(key, count, delay_ms)?;
         Ok(text_result("pressed"))
     })();
     flatten(result)
@@ -717,7 +776,7 @@ fn paste(args: Value, mode: AccessMode) -> Value {
     let result = (|| {
         ensure_mutation(mode)?;
         let text = str_arg(&args, "text").ok_or(ToolExecError::Missing("text"))?;
-        Peekaboo::new().paste(text)?;
+        peekaboo().paste(text)?;
         Ok(text_result("pasted"))
     })();
     flatten(result)
@@ -728,7 +787,7 @@ fn hotkey(args: Value, mode: AccessMode) -> Value {
         ensure_mutation(mode)?;
         let keys = str_arg(&args, "keys").ok_or(ToolExecError::Missing("keys"))?;
         let parts = keys.split('+').map(str::trim).collect::<Vec<_>>();
-        Peekaboo::new().hotkey(&parts)?;
+        peekaboo().hotkey(&parts)?;
         Ok(text_result("hotkey pressed"))
     })();
     flatten(result)
@@ -754,7 +813,7 @@ fn scroll(args: Value, mode: AccessMode) -> Value {
             };
             (direction, dy.unsigned_abs().max(1) as u32)
         };
-        Peekaboo::new().scroll(direction, amount)?;
+        peekaboo().scroll(direction, amount)?;
         Ok(text_result("scrolled"))
     })();
     flatten(result)
@@ -769,7 +828,7 @@ fn swipe(args: Value, mode: AccessMode) -> Value {
             .get("duration_ms")
             .and_then(Value::as_u64)
             .unwrap_or(250);
-        Peekaboo::new().swipe(Target::Point(from), Target::Point(to), duration_ms)?;
+        peekaboo().swipe(Target::Point(from), Target::Point(to), duration_ms)?;
         Ok(text_result("swiped"))
     })();
     flatten(result)
@@ -784,7 +843,7 @@ fn drag(args: Value, mode: AccessMode) -> Value {
             .get("duration_ms")
             .and_then(Value::as_u64)
             .unwrap_or(250);
-        Peekaboo::new().drag(Target::Point(from), Target::Point(to), duration_ms)?;
+        peekaboo().drag(Target::Point(from), Target::Point(to), duration_ms)?;
         Ok(text_result("dragged"))
     })();
     flatten(result)
@@ -804,7 +863,7 @@ fn move_pointer(args: Value, mode: AccessMode) -> Value {
                 y: int_arg(&args, "y").ok_or(ToolExecError::Missing("y"))?,
             })
         };
-        Peekaboo::new().move_cursor(target)?;
+        peekaboo().move_cursor(target)?;
         Ok(text_result("moved"))
     })();
     flatten(result)
@@ -816,7 +875,7 @@ fn set_value(args: Value, mode: AccessMode) -> Value {
         let on = str_arg(&args, "on").ok_or(ToolExecError::Missing("on"))?;
         let snapshot = str_arg(&args, "snapshot").map(str::to_string);
         let value = str_arg(&args, "value").ok_or(ToolExecError::Missing("value"))?;
-        Peekaboo::new().set_value(
+        peekaboo().set_value(
             Target::Query {
                 query: on.to_string(),
                 snapshot,
@@ -834,7 +893,7 @@ fn perform_action(args: Value, mode: AccessMode) -> Value {
         let on = str_arg(&args, "on").ok_or(ToolExecError::Missing("on"))?;
         let snapshot = str_arg(&args, "snapshot").map(str::to_string);
         let action = str_arg(&args, "action").ok_or(ToolExecError::Missing("action"))?;
-        Peekaboo::new().perform_action(
+        peekaboo().perform_action(
             Target::Query {
                 query: on.to_string(),
                 snapshot,
@@ -855,7 +914,7 @@ fn open_target(args: Value, mode: AccessMode) -> Value {
             .get("no_focus")
             .and_then(Value::as_bool)
             .unwrap_or(false);
-        Peekaboo::new().open(target, app, no_focus)?;
+        peekaboo().open(target, app, no_focus)?;
         Ok(text_result("opened"))
     })();
     flatten(result)
@@ -865,7 +924,7 @@ fn run_file(args: Value, mode: AccessMode) -> Value {
     let result = (|| {
         ensure_mutation(mode)?;
         let file = str_arg(&args, "file").ok_or(ToolExecError::Missing("file"))?;
-        let results = Peekaboo::new().run_file(&PathBuf::from(file))?;
+        let results = peekaboo().run_file(&PathBuf::from(file))?;
         Ok(json_text_result(&json!(results)))
     })();
     flatten(result)
@@ -896,7 +955,7 @@ fn window(args: Value, mode: AccessMode) -> Value {
     let action = str_arg(&args, "action").unwrap_or("");
     if action == "list" {
         return flatten(
-            Peekaboo::new()
+            peekaboo()
                 .window("list", None, None, None)
                 .map(|value| json_text_result(&value))
                 .map_err(ToolExecError::from),
@@ -911,9 +970,9 @@ fn window(args: Value, mode: AccessMode) -> Value {
         let app = str_arg(&args, "app").ok_or(ToolExecError::Missing("app"))?;
         match action {
             "focus" | "close" | "minimize" => {
-                Peekaboo::new().window(action, Some(app), None, None)?
+                peekaboo().window(action, Some(app), None, None)?
             }
-            "move" | "resize" | "set-bounds" => Peekaboo::new().window(
+            "move" | "resize" | "set-bounds" => peekaboo().window(
                 action,
                 Some(app),
                 None,
@@ -964,7 +1023,7 @@ fn app(args: Value, mode: AccessMode) -> Value {
         let app = str_arg(&args, "app").ok_or(ToolExecError::Missing("app"))?;
         match action {
             "launch" | "activate" | "switch" | "hide" | "unhide" | "quit" => {
-                Peekaboo::new().app(action, Some(app))?
+                peekaboo().app(action, Some(app))?
             }
             _ => return Err(ToolExecError::Missing("action")),
         };
@@ -981,7 +1040,7 @@ fn menu(args: Value, mode: AccessMode) -> Value {
             // ponytail: ensure_observation removed - was a no-op.
 
             let action_name = if action == "inspect" { "list" } else { action };
-            return Ok(json_text_result(&Peekaboo::new().menu(
+            return Ok(json_text_result(&peekaboo().menu(
                 action_name,
                 app,
                 None,
@@ -991,7 +1050,7 @@ fn menu(args: Value, mode: AccessMode) -> Value {
         ensure_mutation(mode)?;
         let menu = str_arg(&args, "menu").ok_or(ToolExecError::Missing("menu"))?;
         let item = str_arg(&args, "item").ok_or(ToolExecError::Missing("item"))?;
-        Peekaboo::new().menu("click", app, Some(menu), Some(item))?;
+        peekaboo().menu("click", app, Some(menu), Some(item))?;
         Ok(text_result("menu action complete"))
     })();
     flatten(result)
@@ -1257,6 +1316,7 @@ mod tests {
                 "folk_clipboard_read",
                 "folk_clipboard_write",
                 "folk_permissions",
+                "folk_doctor",
                 "folk_screen_capture",
                 "folk_ui_snapshot",
                 "folk_click",

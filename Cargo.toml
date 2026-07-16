@@ -20,7 +20,7 @@ chacha20poly1305 = "0.10"
 hex = "0.4"
 hkdf = "0.12"
 rand = "0.9"
-rs_peekaboo = "0.3.1"
+rs_peekaboo = "0.3.2"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
