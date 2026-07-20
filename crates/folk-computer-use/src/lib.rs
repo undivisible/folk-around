@@ -629,8 +629,7 @@ fn image(args: Value, _mode: AccessMode) -> Value {
         let capture = if let Some(app) = str_arg(&args, "app") {
             peekaboo().image_app(app, path, retina)?
         } else {
-            let capture_mode =
-                ImageMode::parse_or_err(str_arg(&args, "mode").unwrap_or("screen"))?;
+            let capture_mode = ImageMode::parse_or_err(str_arg(&args, "mode").unwrap_or("screen"))?;
             peekaboo().image(capture_mode, path, retina)?
         };
         let metadata = json!({
@@ -969,15 +968,10 @@ fn window(args: Value, mode: AccessMode) -> Value {
         }
         let app = str_arg(&args, "app").ok_or(ToolExecError::Missing("app"))?;
         match action {
-            "focus" | "close" | "minimize" => {
-                peekaboo().window(action, Some(app), None, None)?
+            "focus" | "close" | "minimize" => peekaboo().window(action, Some(app), None, None)?,
+            "move" | "resize" | "set-bounds" => {
+                peekaboo().window(action, Some(app), None, Some(window_bounds(action, &args)?))?
             }
-            "move" | "resize" | "set-bounds" => peekaboo().window(
-                action,
-                Some(app),
-                None,
-                Some(window_bounds(action, &args)?),
-            )?,
             _ => return Err(ToolExecError::Missing("action")),
         };
         Ok(text_result("window action complete"))
