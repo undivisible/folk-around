@@ -31,7 +31,7 @@ enum ToolExecError {
     Io(#[from] std::io::Error),
     #[error("action blocked in this mode")]
     Blocked,
-    #[error("{0}")]
+    #[error("computer-use backend request failed")]
     Peekaboo(#[from] rs_peekaboo::PeekabooError),
     #[error("{0}")]
     Json(#[from] serde_json::Error),
@@ -726,7 +726,14 @@ fn click(args: Value, mode: AccessMode) -> Value {
 fn click_with_adapter(
     args: Value,
     mode: AccessMode,
-    execute_coordinate: impl FnOnce(AccessMode, i64, i64, &str, u32) -> Result<Value, ToolExecError>,
+    execute_coordinate: impl FnOnce(
+        AccessMode,
+        i64,
+        i64,
+        &str,
+        u32,
+        bool,
+    ) -> Result<Option<Value>, ToolExecError>,
 ) -> Value {
     let result = (|| {
         ensure_mutation(mode)?;
@@ -748,19 +755,22 @@ fn click_with_adapter(
         };
         let button = str_arg(&args, "button").unwrap_or("left");
         let count = int_arg(&args, "count").unwrap_or(1).max(1) as u32;
-        if matches!(target, Target::Point(_)) {
-            return execute_coordinate(
+        let background = args
+            .get("background")
+            .and_then(Value::as_bool)
+            .unwrap_or(true);
+        if matches!(target, Target::Point(_))
+            && let Some(response) = execute_coordinate(
                 mode,
                 int_arg(&args, "x").ok_or(ToolExecError::Missing("x"))?,
                 int_arg(&args, "y").ok_or(ToolExecError::Missing("y"))?,
                 button,
                 count,
-            );
+                background,
+            )?
+        {
+            return Ok(response);
         }
-        let background = args
-            .get("background")
-            .and_then(Value::as_bool)
-            .unwrap_or(true);
         peekaboo().click_with_options(target, button, count, background)?;
         Ok(text_result("clicked"))
     })();
@@ -876,7 +886,7 @@ fn move_pointer(args: Value, mode: AccessMode) -> Value {
 fn move_pointer_with_adapter(
     args: Value,
     mode: AccessMode,
-    execute_coordinate: impl FnOnce(AccessMode, i64, i64) -> Result<Value, ToolExecError>,
+    execute_coordinate: impl FnOnce(AccessMode, i64, i64) -> Result<Option<Value>, ToolExecError>,
 ) -> Value {
     let result = (|| {
         ensure_mutation(mode)?;
@@ -886,11 +896,17 @@ fn move_pointer_with_adapter(
                 snapshot: str_arg(&args, "snapshot").map(str::to_string),
             }
         } else {
-            return execute_coordinate(
+            if let Some(response) = execute_coordinate(
                 mode,
                 int_arg(&args, "x").ok_or(ToolExecError::Missing("x"))?,
                 int_arg(&args, "y").ok_or(ToolExecError::Missing("y"))?,
-            );
+            )? {
+                return Ok(response);
+            }
+            Target::Point(Point {
+                x: int_arg(&args, "x").ok_or(ToolExecError::Missing("x"))?,
+                y: int_arg(&args, "y").ok_or(ToolExecError::Missing("y"))?,
+            })
         };
         peekaboo().move_cursor(target)?;
         Ok(text_result("moved"))
@@ -1290,9 +1306,9 @@ mod tests {
             responses.push(click_with_adapter(
                 json!({ "x": 10, "y": 20 }),
                 mode,
-                |_, _, _, _, _| {
+                |_, _, _, _, _, _| {
                     calls.set(calls.get() + 1);
-                    Ok(text_result("adapter called"))
+                    Ok(Some(text_result("adapter called")))
                 },
             ));
             responses.push(move_pointer_with_adapter(
@@ -1300,7 +1316,7 @@ mod tests {
                 mode,
                 |_, _, _| {
                     calls.set(calls.get() + 1);
-                    Ok(text_result("adapter called"))
+                    Ok(Some(text_result("adapter called")))
                 },
             ));
         }
@@ -1317,15 +1333,15 @@ mod tests {
     fn full_coordinate_tools_should_route_through_adapter() {
         let calls = Cell::new(0_u32);
         let click_response = click_with_adapter(
-            json!({ "x": 10, "y": 20, "button": "right", "count": 2 }),
+            json!({ "x": 10, "y": 20, "button": "right", "count": 2, "background": false }),
             AccessMode::Full,
-            |mode, x, y, button, count| {
+            |mode, x, y, button, count, background| {
                 assert_eq!(
-                    (mode, x, y, button, count),
-                    (AccessMode::Full, 10, 20, "right", 2)
+                    (mode, x, y, button, count, background),
+                    (AccessMode::Full, 10, 20, "right", 2, false)
                 );
                 calls.set(calls.get() + 1);
-                Ok(json!({ "adapter": "click" }))
+                Ok(Some(json!({ "adapter": "click" })))
             },
         );
         let move_response = move_pointer_with_adapter(
@@ -1334,7 +1350,7 @@ mod tests {
             |mode, x, y| {
                 assert_eq!((mode, x, y), (AccessMode::Full, 30, 40));
                 calls.set(calls.get() + 1);
-                Ok(json!({ "adapter": "move" }))
+                Ok(Some(json!({ "adapter": "move" })))
             },
         );
 
@@ -1356,6 +1372,15 @@ mod tests {
         )));
 
         assert_eq!(error.to_string(), "computer-use protocol request failed");
+    }
+
+    #[test]
+    fn backend_errors_should_not_expose_private_details() {
+        let error = ToolExecError::Peekaboo(rs_peekaboo::PeekabooError::System(
+            "private state path: /Users/private-user/.local/state".to_string(),
+        ));
+
+        assert_eq!(error.to_string(), "computer-use backend request failed");
     }
 
     #[test]

@@ -6,9 +6,10 @@ use ed25519_dalek::{Signer, SigningKey};
 use folk_core::AccessMode;
 use folk_mcp::json_text_result;
 use praefectus::{
-    Action, ActionRequest, AuthorityGrant, CancellationToken, Ed25519AuthorityVerifier, Engine,
-    ExecuteReport, MouseButton, NativeExecutor, PROTOCOL_VERSION, SafetyClass, SignedAuthority,
-    TargetRef, Terminal, VerificationPolicy, canonical_authority_bytes, normalized_action_hash,
+    Action, ActionRequest, AuthorityGrant, CancellationToken, Capabilities,
+    Ed25519AuthorityVerifier, Engine, ExecuteReport, Executor, MouseButton, NativeExecutor,
+    PROTOCOL_VERSION, SafetyClass, SignedAuthority, TargetRef, Terminal, VerificationPolicy,
+    canonical_authority_bytes, normalized_action_hash,
 };
 use serde_json::{Value, json, to_value};
 
@@ -22,15 +23,18 @@ pub(crate) fn execute_click(
     y: i64,
     button: &str,
     count: u32,
-) -> Result<Value, ToolExecError> {
+    background: bool,
+) -> Result<Option<Value>, ToolExecError> {
     super::ensure_mutation(mode)?;
+    if !click_is_candidate(button, count, background) {
+        return Ok(None);
+    }
     let button = match button {
         "left" => MouseButton::Left,
         "right" => MouseButton::Right,
-        "middle" => MouseButton::Middle,
-        _ => return Err(ToolExecError::Missing("valid button")),
+        _ => return Ok(None),
     };
-    execute(
+    try_execute(
         Action::Click {
             button,
             count,
@@ -41,13 +45,23 @@ pub(crate) fn execute_click(
     )
 }
 
-pub(crate) fn execute_move(mode: AccessMode, x: i64, y: i64) -> Result<Value, ToolExecError> {
+pub(crate) fn execute_move(
+    mode: AccessMode,
+    x: i64,
+    y: i64,
+) -> Result<Option<Value>, ToolExecError> {
     super::ensure_mutation(mode)?;
-    execute(Action::Move, x, y)
+    try_execute(Action::Move, x, y)
 }
 
-fn execute(action: Action, x: i64, y: i64) -> Result<Value, ToolExecError> {
+fn try_execute(action: Action, x: i64, y: i64) -> Result<Option<Value>, ToolExecError> {
     let executor = NativeExecutor::default();
+    let Ok(capabilities) = executor.capabilities() else {
+        return Ok(None);
+    };
+    if !supports_action(&capabilities, action_name(&action)) {
+        return Ok(None);
+    }
     let observation = executor.observe_coordinates()?;
     let display = observation
         .displays
@@ -127,7 +141,32 @@ fn execute(action: Action, x: i64, y: i64) -> Result<Value, ToolExecError> {
     )]);
     let report = Engine::new(executor, ledger_path()?, verifier)
         .execute(&request, &CancellationToken::default())?;
-    report_result(report)
+    report_result(report).map(Some)
+}
+
+fn click_is_candidate(button: &str, count: u32, background: bool) -> bool {
+    !background && matches!(button, "left" | "right") && (1..=3).contains(&count)
+}
+
+fn action_name(action: &Action) -> &'static str {
+    match action {
+        Action::Click { .. } => "click",
+        Action::Move => "move",
+        Action::SetValue { .. } => "set_value",
+        _ => "",
+    }
+}
+
+fn supports_action(capabilities: &Capabilities, action: &str) -> bool {
+    capabilities
+        .permissions
+        .get("coordinate_capture")
+        .copied()
+        .unwrap_or(false)
+        && capabilities
+            .supported_actions
+            .iter()
+            .any(|supported| supported == action)
 }
 
 fn action_policy(action: &Action) -> (SafetyClass, VerificationPolicy) {
@@ -211,6 +250,35 @@ mod tests {
     fn full_access_check_precedes_authority_issuance() {
         let result = execute_move(AccessMode::Limited, 0, 0);
         assert!(matches!(result, Err(ToolExecError::Blocked)));
+    }
+
+    #[test]
+    fn coordinate_click_routing_preserves_existing_semantics() {
+        assert!(click_is_candidate("left", 1, false));
+        assert!(click_is_candidate("right", 3, false));
+        assert!(!click_is_candidate("left", 1, true));
+        assert!(!click_is_candidate("middle", 1, false));
+        assert!(!click_is_candidate("left", 0, false));
+        assert!(!click_is_candidate("left", 4, false));
+    }
+
+    #[test]
+    fn coordinate_routing_requires_capture_and_exact_action_support() {
+        let mut capabilities = Capabilities {
+            platform: "test".to_string(),
+            backend: "test".to_string(),
+            supported_actions: vec!["click".to_string()],
+            permissions: [("coordinate_capture".to_string(), true)]
+                .into_iter()
+                .collect(),
+            display_geometry_hash: "0".repeat(64),
+        };
+        assert!(supports_action(&capabilities, "click"));
+        assert!(!supports_action(&capabilities, "move"));
+        capabilities
+            .permissions
+            .insert("coordinate_capture".to_string(), false);
+        assert!(!supports_action(&capabilities, "click"));
     }
 
     #[test]
