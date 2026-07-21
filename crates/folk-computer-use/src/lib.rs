@@ -12,6 +12,8 @@ use rs_peekaboo::{Bounds, Direction, ImageCapture, ImageMode, Peekaboo, Peekaboo
 use serde_json::{Value, json};
 use thiserror::Error;
 
+mod praefectus_adapter;
+
 const SAFE_COMMANDS: &[&str] = &[
     "ls", "cat", "grep", "find", "head", "tail", "wc", "curl", "echo", "date", "whoami",
     "hostname", "uname", "which", "pwd", "ps", "uptime", "df", "du",
@@ -33,6 +35,8 @@ enum ToolExecError {
     Peekaboo(#[from] rs_peekaboo::PeekabooError),
     #[error("{0}")]
     Json(#[from] serde_json::Error),
+    #[error("{0}")]
+    Praefectus(#[from] praefectus::ProtocolError),
 }
 
 fn peekaboo() -> Peekaboo {
@@ -736,6 +740,15 @@ fn click(args: Value, mode: AccessMode) -> Value {
         };
         let button = str_arg(&args, "button").unwrap_or("left");
         let count = int_arg(&args, "count").unwrap_or(1).max(1) as u32;
+        if matches!(target, Target::Point(_)) {
+            return praefectus_adapter::execute_click(
+                mode,
+                int_arg(&args, "x").ok_or(ToolExecError::Missing("x"))?,
+                int_arg(&args, "y").ok_or(ToolExecError::Missing("y"))?,
+                button,
+                count,
+            );
+        }
         let background = args
             .get("background")
             .and_then(Value::as_bool)
@@ -857,10 +870,11 @@ fn move_pointer(args: Value, mode: AccessMode) -> Value {
                 snapshot: str_arg(&args, "snapshot").map(str::to_string),
             }
         } else {
-            Target::Point(Point {
-                x: int_arg(&args, "x").ok_or(ToolExecError::Missing("x"))?,
-                y: int_arg(&args, "y").ok_or(ToolExecError::Missing("y"))?,
-            })
+            return praefectus_adapter::execute_move(
+                mode,
+                int_arg(&args, "x").ok_or(ToolExecError::Missing("x"))?,
+                int_arg(&args, "y").ok_or(ToolExecError::Missing("y"))?,
+            );
         };
         peekaboo().move_cursor(target)?;
         Ok(text_result("moved"))

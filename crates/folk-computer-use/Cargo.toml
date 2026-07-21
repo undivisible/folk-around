@@ -8,8 +8,11 @@ description = "folk-around computer-use tools (shell, clipboard, UI, peekaboo)"
 
 [dependencies]
 base64.workspace = true
+ed25519-dalek = { version = "2.1", default-features = false, features = ["std"] }
 folk-core = { path = "../folk-core", version = "0.3.4" }
 folk-mcp = { path = "../folk-mcp", version = "0.3.4" }
+praefectus = "=0.1.0"
+rand.workspace = true
 rs_peekaboo.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
