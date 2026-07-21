@@ -76,6 +76,7 @@ fn execute(action: Action, x: i64, y: i64) -> Result<Value, ToolExecError> {
     let key_id = "process-key".to_string();
     let policy_generation = "folk-full-v1".to_string();
     let subject = "folk-local-host".to_string();
+    let (safety, verification) = action_policy(&action);
     let mut request = ActionRequest {
         protocol_version: PROTOCOL_VERSION,
         action_version: PROTOCOL_VERSION,
@@ -91,7 +92,7 @@ fn execute(action: Action, x: i64, y: i64) -> Result<Value, ToolExecError> {
                 operation_id,
                 subject,
                 session_id: session_id.clone(),
-                risk: SafetyClass::Reversible,
+                risk: safety,
                 expires_at_ms: now + 30_000,
                 policy_generation: policy_generation.clone(),
                 action_hash: String::new(),
@@ -108,8 +109,8 @@ fn execute(action: Action, x: i64, y: i64) -> Result<Value, ToolExecError> {
             snapshot_content_hash: observation.snapshot_content_hash,
         },
         deadline_at_ms: now + 30_000,
-        verification: VerificationPolicy::SnapshotChanged,
-        safety: SafetyClass::Reversible,
+        verification,
+        safety,
     };
     request.authority.grant.action_hash = normalized_action_hash(&request)?;
     request.authority.signature = signing_key
@@ -126,6 +127,17 @@ fn execute(action: Action, x: i64, y: i64) -> Result<Value, ToolExecError> {
     )]);
     let report = Engine::new(executor, ledger_path()?, verifier)
         .execute(&request, &CancellationToken::default())?;
+    report_result(report)
+}
+
+fn action_policy(action: &Action) -> (SafetyClass, VerificationPolicy) {
+    match action {
+        Action::Move => (SafetyClass::Reversible, VerificationPolicy::None),
+        _ => (SafetyClass::External, VerificationPolicy::SnapshotChanged),
+    }
+}
+
+fn report_result(report: ExecuteReport) -> Result<Value, ToolExecError> {
     let retry_safe = report_is_retry_safe(&report);
     Ok(json_text_result(&json!({
         "report": to_value(report)?,
@@ -152,12 +164,14 @@ fn ledger_path() -> Result<PathBuf, ToolExecError> {
 }
 
 fn ledger_path_from(xdg_state_home: Option<PathBuf>, home: Option<PathBuf>) -> Option<PathBuf> {
-    let state_home = xdg_state_home
-        .filter(|path| !path.as_os_str().is_empty())
-        .or_else(|| {
-            home.filter(|path| !path.as_os_str().is_empty())
-                .map(|path| path.join(".local").join("state"))
-        })?;
+    let state_home = match xdg_state_home.filter(|path| !path.as_os_str().is_empty()) {
+        Some(path) if path.is_absolute() => path,
+        Some(_) => return None,
+        None => match home.filter(|path| !path.as_os_str().is_empty()) {
+            Some(path) if path.is_absolute() => path.join(".local").join("state"),
+            _ => return None,
+        },
+    };
     Some(
         state_home
             .join("folk-around")
@@ -167,18 +181,29 @@ fn ledger_path_from(xdg_state_home: Option<PathBuf>, home: Option<PathBuf>) -> O
 }
 
 fn report_is_retry_safe(report: &ExecuteReport) -> bool {
-    !report.acknowledgements.iter().any(|acknowledgement| {
-        matches!(
-            &acknowledgement.state,
-            praefectus::AckState::Terminal { terminal }
-                if matches!(&**terminal, Terminal::OutcomeUnknown { .. })
-        )
-    })
+    let mut terminals = report
+        .acknowledgements
+        .iter()
+        .filter_map(|acknowledgement| match &acknowledgement.state {
+            praefectus::AckState::Terminal { terminal } => Some(&**terminal),
+            _ => None,
+        });
+    let Some(first) = terminals.next() else {
+        return false;
+    };
+    terminal_proves_no_effect(first) && terminals.all(terminal_proves_no_effect)
+}
+
+fn terminal_proves_no_effect(terminal: &Terminal) -> bool {
+    matches!(
+        terminal,
+        Terminal::Rejected { .. } | Terminal::CancelledBeforeEffect | Terminal::ExpiredBeforeEffect
+    )
 }
 
 #[cfg(test)]
 mod tests {
-    use praefectus::{AckState, ActionAck, Effect, Receipt};
+    use praefectus::{AckState, ActionAck, Effect, FailureCode, Receipt};
 
     use super::*;
 
@@ -190,11 +215,52 @@ mod tests {
 
     #[test]
     fn folk_ledger_is_outside_the_working_directory() {
-        let path = ledger_path_from(Some(PathBuf::from("/state")), None)
+        let state_root = std::env::temp_dir().join("folk-state");
+        let path = ledger_path_from(Some(state_root.clone()), None)
             .expect("XDG state path should resolve");
         assert_eq!(
             path,
-            PathBuf::from("/state/folk-around/praefectus/operations.jsonl")
+            state_root
+                .join("folk-around")
+                .join("praefectus")
+                .join("operations.jsonl")
+        );
+    }
+
+    #[test]
+    fn folk_ledger_rejects_relative_state_roots() {
+        assert_eq!(
+            (
+                ledger_path_from(
+                    Some(PathBuf::from("relative-state")),
+                    Some(PathBuf::from("/home/folk")),
+                ),
+                ledger_path_from(None, Some(PathBuf::from("relative-home"))),
+            ),
+            (None, None)
+        );
+    }
+
+    #[test]
+    fn click_authority_uses_external_risk() {
+        let (safety, verification) = action_policy(&Action::Click {
+            button: MouseButton::Left,
+            count: 1,
+            allow_coordinate_fallback: false,
+        });
+
+        assert!(
+            safety == SafetyClass::External
+                && matches!(verification, VerificationPolicy::SnapshotChanged)
+        );
+    }
+
+    #[test]
+    fn move_authority_is_reversible_without_verification() {
+        let (safety, verification) = action_policy(&Action::Move);
+
+        assert!(
+            safety == SafetyClass::Reversible && matches!(verification, VerificationPolicy::None)
         );
     }
 
@@ -212,34 +278,90 @@ mod tests {
     }
 
     #[test]
-    fn outcome_unknown_is_never_retry_safe() {
-        let report = ExecuteReport {
-            acknowledgements: vec![ActionAck {
-                protocol_version: PROTOCOL_VERSION,
-                operation_id: "folk-operation".to_string(),
-                sequence: 2,
-                action_hash: "0".repeat(64),
-                replayed: false,
-                state: AckState::Terminal {
-                    terminal: Box::new(Terminal::OutcomeUnknown {
-                        receipt: Receipt {
-                            protocol_version: PROTOCOL_VERSION,
-                            action_name: "move".to_string(),
-                            action_hash: "0".repeat(64),
-                            started_at_ms: 1,
-                            finished_at_ms: 2,
-                            backend: "test".to_string(),
-                            fallback_chain: Vec::new(),
-                            effect: Effect::Unknown,
-                            before: None,
-                            after: None,
-                            warnings: Vec::new(),
-                        },
-                        message: "delivery could not be determined".to_string(),
-                    }),
-                },
-            }],
-        };
-        assert!(!report_is_retry_safe(&report));
+    fn no_effect_terminals_serialize_retry_safe_true() {
+        for terminal in [
+            Terminal::Rejected {
+                code: FailureCode::PermissionDenied,
+                message: "action rejected".to_string(),
+            },
+            Terminal::CancelledBeforeEffect,
+            Terminal::ExpiredBeforeEffect,
+        ] {
+            assert!(serialized_retry_safe(terminal));
+        }
+    }
+
+    #[test]
+    fn succeeded_terminal_serializes_retry_safe_false() {
+        assert!(!serialized_retry_safe(Terminal::Succeeded {
+            receipt: receipt(Effect::Verified),
+        }));
+    }
+
+    #[test]
+    fn outcome_unknown_serializes_retry_safe_false() {
+        assert!(!serialized_retry_safe(Terminal::OutcomeUnknown {
+            receipt: receipt(Effect::Unknown),
+            message: "delivery could not be determined".to_string(),
+        }));
+    }
+
+    #[test]
+    fn failed_or_missing_terminal_is_not_retry_safe() {
+        let failed = serialized_retry_safe(Terminal::Failed {
+            code: FailureCode::DispatchFailed,
+            message: "dispatch failed".to_string(),
+        });
+        let missing = report_is_retry_safe(&ExecuteReport {
+            acknowledgements: vec![acknowledgement(AckState::Accepted)],
+        });
+
+        assert_eq!((failed, missing), (false, false));
+    }
+
+    fn serialized_retry_safe(terminal: Terminal) -> bool {
+        let response = report_result(ExecuteReport {
+            acknowledgements: vec![acknowledgement(AckState::Terminal {
+                terminal: Box::new(terminal),
+            })],
+        })
+        .expect("report should serialize");
+        let payload: Value = serde_json::from_str(
+            response["content"][0]["text"]
+                .as_str()
+                .expect("report text should be present"),
+        )
+        .expect("report text should be JSON");
+
+        payload["retry_safe"]
+            .as_bool()
+            .expect("retry_safe should be a boolean")
+    }
+
+    fn acknowledgement(state: AckState) -> ActionAck {
+        ActionAck {
+            protocol_version: PROTOCOL_VERSION,
+            operation_id: "folk-operation".to_string(),
+            sequence: 2,
+            action_hash: "0".repeat(64),
+            replayed: false,
+            state,
+        }
+    }
+
+    fn receipt(effect: Effect) -> Receipt {
+        Receipt {
+            protocol_version: PROTOCOL_VERSION,
+            action_name: "move".to_string(),
+            action_hash: "0".repeat(64),
+            started_at_ms: 1,
+            finished_at_ms: 2,
+            backend: "test".to_string(),
+            fallback_chain: Vec::new(),
+            effect,
+            before: None,
+            after: None,
+            warnings: Vec::new(),
+        }
     }
 }

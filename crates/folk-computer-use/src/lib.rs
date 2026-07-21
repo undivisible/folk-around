@@ -35,7 +35,7 @@ enum ToolExecError {
     Peekaboo(#[from] rs_peekaboo::PeekabooError),
     #[error("{0}")]
     Json(#[from] serde_json::Error),
-    #[error("{0}")]
+    #[error("computer-use protocol request failed")]
     Praefectus(#[from] praefectus::ProtocolError),
 }
 
@@ -720,6 +720,14 @@ fn ui_snapshot(_mode: AccessMode) -> Value {
 }
 
 fn click(args: Value, mode: AccessMode) -> Value {
+    click_with_adapter(args, mode, praefectus_adapter::execute_click)
+}
+
+fn click_with_adapter(
+    args: Value,
+    mode: AccessMode,
+    execute_coordinate: impl FnOnce(AccessMode, i64, i64, &str, u32) -> Result<Value, ToolExecError>,
+) -> Value {
     let result = (|| {
         ensure_mutation(mode)?;
         let target = if let Some(index) = int_arg(&args, "index") {
@@ -741,7 +749,7 @@ fn click(args: Value, mode: AccessMode) -> Value {
         let button = str_arg(&args, "button").unwrap_or("left");
         let count = int_arg(&args, "count").unwrap_or(1).max(1) as u32;
         if matches!(target, Target::Point(_)) {
-            return praefectus_adapter::execute_click(
+            return execute_coordinate(
                 mode,
                 int_arg(&args, "x").ok_or(ToolExecError::Missing("x"))?,
                 int_arg(&args, "y").ok_or(ToolExecError::Missing("y"))?,
@@ -862,6 +870,14 @@ fn drag(args: Value, mode: AccessMode) -> Value {
 }
 
 fn move_pointer(args: Value, mode: AccessMode) -> Value {
+    move_pointer_with_adapter(args, mode, praefectus_adapter::execute_move)
+}
+
+fn move_pointer_with_adapter(
+    args: Value,
+    mode: AccessMode,
+    execute_coordinate: impl FnOnce(AccessMode, i64, i64) -> Result<Value, ToolExecError>,
+) -> Value {
     let result = (|| {
         ensure_mutation(mode)?;
         let target = if let Some(element_id) = str_arg(&args, "element_id") {
@@ -870,7 +886,7 @@ fn move_pointer(args: Value, mode: AccessMode) -> Value {
                 snapshot: str_arg(&args, "snapshot").map(str::to_string),
             }
         } else {
-            return praefectus_adapter::execute_move(
+            return execute_coordinate(
                 mode,
                 int_arg(&args, "x").ok_or(ToolExecError::Missing("x"))?,
                 int_arg(&args, "y").ok_or(ToolExecError::Missing("y"))?,
@@ -1192,6 +1208,7 @@ impl From<ToolExecError> for ToolError {
 mod tests {
     use super::*;
     use folk_mcp::handle_message;
+    use std::cell::Cell;
 
     #[test]
     fn sandbox_shell_should_match_legacy_safe_command_behavior() {
@@ -1263,6 +1280,82 @@ mod tests {
         .unwrap()
         .unwrap();
         assert!(response.contains("action blocked in this mode"));
+    }
+
+    #[test]
+    fn restricted_coordinate_tools_should_not_route_through_adapter() {
+        let calls = Cell::new(0_u32);
+        let mut responses = Vec::new();
+        for mode in [AccessMode::Limited, AccessMode::Sandbox] {
+            responses.push(click_with_adapter(
+                json!({ "x": 10, "y": 20 }),
+                mode,
+                |_, _, _, _, _| {
+                    calls.set(calls.get() + 1);
+                    Ok(text_result("adapter called"))
+                },
+            ));
+            responses.push(move_pointer_with_adapter(
+                json!({ "x": 10, "y": 20 }),
+                mode,
+                |_, _, _| {
+                    calls.set(calls.get() + 1);
+                    Ok(text_result("adapter called"))
+                },
+            ));
+        }
+
+        assert!(
+            calls.get() == 0
+                && responses.iter().all(|response| {
+                    response.to_string().contains("action blocked in this mode")
+                })
+        );
+    }
+
+    #[test]
+    fn full_coordinate_tools_should_route_through_adapter() {
+        let calls = Cell::new(0_u32);
+        let click_response = click_with_adapter(
+            json!({ "x": 10, "y": 20, "button": "right", "count": 2 }),
+            AccessMode::Full,
+            |mode, x, y, button, count| {
+                assert_eq!(
+                    (mode, x, y, button, count),
+                    (AccessMode::Full, 10, 20, "right", 2)
+                );
+                calls.set(calls.get() + 1);
+                Ok(json!({ "adapter": "click" }))
+            },
+        );
+        let move_response = move_pointer_with_adapter(
+            json!({ "x": 30, "y": 40 }),
+            AccessMode::Full,
+            |mode, x, y| {
+                assert_eq!((mode, x, y), (AccessMode::Full, 30, 40));
+                calls.set(calls.get() + 1);
+                Ok(json!({ "adapter": "move" }))
+            },
+        );
+
+        assert_eq!(
+            (
+                calls.get(),
+                click_response["adapter"].as_str(),
+                move_response["adapter"].as_str(),
+            ),
+            (2, Some("click"), Some("move"))
+        );
+    }
+
+    #[test]
+    fn praefectus_errors_should_not_expose_private_details() {
+        let error = ToolExecError::Praefectus(praefectus::ProtocolError::Io(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "private state path: /Users/private-user/.local/state",
+        )));
+
+        assert_eq!(error.to_string(), "computer-use protocol request failed");
     }
 
     #[test]
