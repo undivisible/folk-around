@@ -71,17 +71,24 @@ pub fn run_stdio(verbose: bool, table: Arc<ToolTable>) -> Result<(), TransportEr
     Ok(())
 }
 
-pub fn run_http(verbose: bool, table: Arc<ToolTable>, port: u16) -> Result<(), TransportError> {
+pub fn run_http(
+    verbose: bool,
+    table: Arc<ToolTable>,
+    port: u16,
+    bearer: String,
+) -> Result<(), TransportError> {
     let listener = TcpListener::bind(http_bind_addr(port))?;
+    let bearer: Arc<str> = bearer.into();
     if verbose {
         log_status(&format!("HTTP listening on http://127.0.0.1:{port}/"));
     }
     for stream in listener.incoming() {
         let table = Arc::clone(&table);
+        let bearer = Arc::clone(&bearer);
         match stream {
             Ok(stream) => {
                 thread::spawn(move || {
-                    let _ = handle_http_client(stream, verbose, table);
+                    let _ = handle_http_client(stream, verbose, table, &bearer);
                 });
             }
             Err(err) if verbose => log_status(&format!("HTTP accept error: {err}")),
@@ -140,6 +147,7 @@ fn handle_http_client(
     mut stream: TcpStream,
     verbose: bool,
     table: Arc<ToolTable>,
+    bearer: &str,
 ) -> Result<(), TransportError> {
     stream.set_read_timeout(Some(HTTP_READ_TIMEOUT))?;
     stream.set_write_timeout(Some(HTTP_WRITE_TIMEOUT))?;
@@ -155,6 +163,16 @@ fn handle_http_client(
         if expected_len.is_none()
             && let Some((offset, len)) = header_end(&buffer)
         {
+            if offset > MAX_HTTP_HEADER_BYTES {
+                send_response(
+                    &mut stream,
+                    400,
+                    "Bad Request",
+                    "text/plain",
+                    b"bad request",
+                )?;
+                return Ok(());
+            }
             let body_len = content_length(&buffer[..offset]);
             if body_len > MAX_HTTP_BODY_BYTES {
                 send_response(
@@ -190,9 +208,38 @@ fn handle_http_client(
     let mut parts = request_line.split_whitespace();
     let method = parts.next().unwrap_or("");
     let path = parts.next().unwrap_or("");
+    let Some((header_offset, _)) = header_end(&buffer) else {
+        send_response(
+            &mut stream,
+            400,
+            "Bad Request",
+            "text/plain",
+            b"missing headers",
+        )?;
+        return Ok(());
+    };
+    let headers = &buffer[..header_offset];
+
+    if has_header(headers, "origin") {
+        send_response(&mut stream, 403, "Forbidden", "text/plain", b"forbidden")?;
+        return Ok(());
+    }
+
+    if matches!((method, path), ("GET", "/sse") | ("POST", "/message"))
+        && !authorized(headers, bearer)
+    {
+        send_response(
+            &mut stream,
+            401,
+            "Unauthorized",
+            "text/plain",
+            b"unauthorized",
+        )?;
+        return Ok(());
+    }
 
     match (method, path) {
-        ("OPTIONS", _) => send_response(&mut stream, 204, "No Content", "text/plain", b"")?,
+        ("OPTIONS", _) => send_response(&mut stream, 403, "Forbidden", "text/plain", b"forbidden")?,
         ("GET", "/health") => send_response(&mut stream, 200, "OK", "text/plain", b"ok")?,
         ("GET", "/sse") => send_sse(stream)?,
         ("POST", "/message") => handle_http_post(stream, verbose, table, &buffer)?,
@@ -276,7 +323,9 @@ fn send_sse(mut stream: TcpStream) -> Result<(), TransportError> {
 }
 
 fn send_sse_inner(stream: &mut TcpStream) -> Result<(), TransportError> {
-    stream.write_all(b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\naccess-control-allow-origin: *\r\naccess-control-allow-headers: content-type\r\naccess-control-allow-methods: GET, POST, OPTIONS\r\nconnection: keep-alive\r\n\r\n")?;
+    stream.write_all(
+        b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: keep-alive\r\n\r\n",
+    )?;
     stream.write_all(b"event: endpoint\ndata: /message\n\n")?;
     stream.flush()?;
     loop {
@@ -299,7 +348,7 @@ fn send_response(
 ) -> Result<(), TransportError> {
     write!(
         stream,
-        "HTTP/1.1 {status} {reason}\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\naccess-control-allow-origin: *\r\naccess-control-allow-headers: content-type\r\naccess-control-allow-methods: GET, POST, OPTIONS\r\nconnection: close\r\n\r\n",
+        "HTTP/1.1 {status} {reason}\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
         body.len()
     )?;
     stream.write_all(body)?;
@@ -339,6 +388,46 @@ fn content_length(headers: &[u8]) -> usize {
             }
         })
         .unwrap_or(0)
+}
+
+fn has_header(headers: &[u8], expected_name: &str) -> bool {
+    String::from_utf8_lossy(headers).lines().any(|line| {
+        line.split_once(':')
+            .is_some_and(|(name, _)| name.trim().eq_ignore_ascii_case(expected_name))
+    })
+}
+
+fn authorized(headers: &[u8], expected: &str) -> bool {
+    let mut value = None;
+    let headers = String::from_utf8_lossy(headers);
+    for line in headers.lines() {
+        let Some((name, candidate)) = line.split_once(':') else {
+            continue;
+        };
+        if !name.trim().eq_ignore_ascii_case("authorization") {
+            continue;
+        }
+        if value.is_some() {
+            return false;
+        }
+        value = Some(candidate.trim());
+    }
+    let Some(candidate) = value.and_then(|value| value.strip_prefix("Bearer ")) else {
+        return false;
+    };
+    constant_time_eq(candidate.as_bytes(), expected.as_bytes())
+}
+
+fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    left.iter()
+        .zip(right)
+        .fold(0_u8, |difference, (left, right)| {
+            difference | (left ^ right)
+        })
+        == 0
 }
 
 fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
@@ -753,7 +842,7 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
-            handle_http_client(stream, false, table).unwrap();
+            handle_http_client(stream, false, table, &"a".repeat(64)).unwrap();
         });
 
         let mut client = TcpStream::connect(addr).unwrap();
@@ -769,6 +858,68 @@ mod tests {
         server.join().unwrap();
 
         assert!(response.starts_with("HTTP/1.1 413 Payload Too Large"));
+    }
+
+    #[test]
+    fn http_should_require_bearer_before_message_dispatch() {
+        let response = send_test_http_request(
+            "POST /message HTTP/1.1\r\nhost: localhost\r\ncontent-length: 2\r\n\r\n{}",
+        );
+        assert!(response.starts_with("HTTP/1.1 401 Unauthorized"));
+    }
+
+    #[test]
+    fn http_should_require_bearer_before_sse_dispatch() {
+        let response = send_test_http_request("GET /sse HTTP/1.1\r\nhost: localhost\r\n\r\n");
+        assert!(response.starts_with("HTTP/1.1 401 Unauthorized"));
+    }
+
+    #[test]
+    fn http_should_reject_browser_origins_even_with_bearer() {
+        let response = send_test_http_request(&format!(
+            "POST /message HTTP/1.1\r\nhost: localhost\r\norigin: https://attacker.example\r\nauthorization: Bearer {}\r\ncontent-length: 2\r\n\r\n{{}}",
+            "a".repeat(64)
+        ));
+        assert!(response.starts_with("HTTP/1.1 403 Forbidden"));
+        assert!(
+            !response
+                .to_ascii_lowercase()
+                .contains("access-control-allow")
+        );
+    }
+
+    #[test]
+    fn http_should_accept_one_exact_bearer() {
+        let bearer = "a".repeat(64);
+        assert!(authorized(
+            format!("host: localhost\r\nauthorization: Bearer {bearer}").as_bytes(),
+            &bearer
+        ));
+        assert!(!authorized(
+            format!("authorization: Bearer {bearer}\r\nauthorization: Bearer {bearer}").as_bytes(),
+            &bearer
+        ));
+        assert!(!authorized(
+            format!("authorization: Bearer {}", "b".repeat(64)).as_bytes(),
+            &bearer
+        ));
+    }
+
+    fn send_test_http_request(request: &str) -> String {
+        let table = Arc::new(ToolTable::new(folk_core::AccessMode::Full));
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            handle_http_client(stream, false, table, &"a".repeat(64)).unwrap();
+        });
+        let mut client = TcpStream::connect(addr).unwrap();
+        client.write_all(request.as_bytes()).unwrap();
+        client.flush().unwrap();
+        let mut response = String::new();
+        client.read_to_string(&mut response).unwrap();
+        server.join().unwrap();
+        response
     }
 
     #[test]

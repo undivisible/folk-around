@@ -3,7 +3,8 @@ use std::sync::Arc;
 
 use folk_computer_use::register_tools;
 use folk_core::{
-    AccessMode, AppConfig, generate_pairing_code, load_config, log_status, save_config,
+    AccessMode, AppConfig, generate_pairing_code, load_config, load_or_create_http_bearer,
+    log_status, save_config,
 };
 use folk_mcp::ToolTable;
 use folk_transport::{run_http, run_stdio, start_p2p};
@@ -91,7 +92,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
         start_p2p(cli.verbose, Arc::clone(&table), url.clone(), room.clone());
         print_pairing_instructions(&url, &room, port);
-        run_http(cli.verbose, table, port)?;
+        let bearer = load_or_create_http_bearer()?;
+        run_http(cli.verbose, table, port, bearer)?;
     } else if let Some(port) = http_port {
         save_config(&AppConfig {
             signal_url: saved.signal_url,
@@ -104,7 +106,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         } else {
             log_status(&format!("HTTP listening on http://127.0.0.1:{port}/"));
         }
-        run_http(cli.verbose, table, port)?;
+        let bearer = load_or_create_http_bearer()?;
+        run_http(cli.verbose, table, port, bearer)?;
     } else {
         if cli.verbose {
             log_status(&format!("stdio mode (mode={})", mode.as_str()));

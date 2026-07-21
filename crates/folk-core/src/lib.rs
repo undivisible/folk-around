@@ -1,9 +1,14 @@
 use std::env;
-use std::fs;
+use std::fmt::Write as _;
+use std::fs::{self, File, OpenOptions};
+use std::io::{Read, Write};
 use std::path::PathBuf;
 
-use rand::Rng;
+use rand::{Rng, RngCore};
 use thiserror::Error;
+
+const HTTP_BEARER_BYTES: usize = 32;
+const HTTP_BEARER_HEX_LEN: usize = HTTP_BEARER_BYTES * 2;
 
 pub fn terminal_time() -> String {
     let seconds = std::time::SystemTime::now()
@@ -61,6 +66,8 @@ pub enum ConfigError {
     HomeMissing,
     #[error("{0}")]
     Io(#[from] std::io::Error),
+    #[error("invalid HTTP bearer credential")]
+    InvalidHttpBearer,
 }
 
 pub fn load_config() -> Result<AppConfig, ConfigError> {
@@ -97,7 +104,7 @@ pub fn load_config() -> Result<AppConfig, ConfigError> {
 
 pub fn save_config(config: &AppConfig) -> Result<(), ConfigError> {
     let dir = config_dir()?;
-    fs::create_dir_all(&dir)?;
+    ensure_private_dir(&dir)?;
     let mut contents = String::new();
     if let Some(value) = &config.signal_url {
         contents.push_str("signal_url=");
@@ -119,7 +126,98 @@ pub fn save_config(config: &AppConfig) -> Result<(), ConfigError> {
         contents.push_str(value);
         contents.push('\n');
     }
-    fs::write(dir.join("config"), contents)?;
+    let path = dir.join("config");
+    fs::write(&path, contents)?;
+    restrict_file_permissions(&path)?;
+    Ok(())
+}
+
+pub fn load_or_create_http_bearer() -> Result<String, ConfigError> {
+    let dir = config_dir()?;
+    ensure_private_dir(&dir)?;
+    let path = dir.join("http-token");
+
+    match open_new_private_file(&path) {
+        Ok(mut file) => {
+            let token = generate_http_bearer();
+            file.write_all(token.as_bytes())?;
+            file.sync_all()?;
+            sync_dir(&dir)?;
+            Ok(token)
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+            let metadata = fs::symlink_metadata(&path)?;
+            if !metadata.file_type().is_file() || metadata.len() != HTTP_BEARER_HEX_LEN as u64 {
+                return Err(ConfigError::InvalidHttpBearer);
+            }
+            restrict_file_permissions(&path)?;
+            let mut token = String::with_capacity(HTTP_BEARER_HEX_LEN);
+            File::open(path)?
+                .take((HTTP_BEARER_HEX_LEN + 1) as u64)
+                .read_to_string(&mut token)?;
+            if !valid_http_bearer(&token) {
+                return Err(ConfigError::InvalidHttpBearer);
+            }
+            Ok(token)
+        }
+        Err(err) => Err(err.into()),
+    }
+}
+
+fn generate_http_bearer() -> String {
+    let mut bytes = [0_u8; HTTP_BEARER_BYTES];
+    rand::rng().fill_bytes(&mut bytes);
+    let mut token = String::with_capacity(HTTP_BEARER_HEX_LEN);
+    for byte in bytes {
+        write!(token, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    token
+}
+
+fn valid_http_bearer(token: &str) -> bool {
+    token.len() == HTTP_BEARER_HEX_LEN
+        && token
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn ensure_private_dir(path: &std::path::Path) -> Result<(), std::io::Error> {
+    fs::create_dir_all(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
+}
+
+fn open_new_private_file(path: &std::path::Path) -> Result<File, std::io::Error> {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options.open(path)
+}
+
+fn restrict_file_permissions(path: &std::path::Path) -> Result<(), std::io::Error> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
+}
+
+fn sync_dir(path: &std::path::Path) -> Result<(), std::io::Error> {
+    #[cfg(unix)]
+    File::open(path)?.sync_all()?;
+    #[cfg(not(unix))]
+    let _ = path;
     Ok(())
 }
 
@@ -153,5 +251,40 @@ mod tests {
         let code = generate_pairing_code();
         assert_eq!(code.len(), 16);
         assert!(code.chars().all(|ch| ch.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn http_bearer_should_be_bounded_lowercase_hex() {
+        let token = generate_http_bearer();
+        assert!(valid_http_bearer(&token));
+        assert!(!valid_http_bearer(&format!("{token}0")));
+        assert!(!valid_http_bearer(&"A".repeat(HTTP_BEARER_HEX_LEN)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn credential_paths_should_be_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = env::temp_dir().join(format!(
+            "folk-around-http-token-{:016x}",
+            rand::rng().random::<u64>()
+        ));
+        ensure_private_dir(&dir).unwrap();
+        let path = dir.join("token");
+        let file = open_new_private_file(&path).unwrap();
+        drop(file);
+
+        assert_eq!(
+            fs::metadata(&dir).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+
+        fs::remove_file(path).unwrap();
+        fs::remove_dir(dir).unwrap();
     }
 }

@@ -47,7 +47,7 @@ Standard MCP over stdin/stdout. Pipe to any MCP client. Use `folk-around --stdio
 Running `folk-around` with no transport flags reuses the saved HTTP port under `~/.config/folk-around/config`. If no HTTP port is saved, it falls back to stdio. Use `--p2p` to reuse the saved signaling server and pairing code.
 
 ### HTTP SSE
-`folk-around --http 8080` — runs an HTTP server with SSE. Clients connect at `http://localhost:8080/sse`. Tunnel via `ssh -L` or Tailscale for remote access.
+`folk-around --http 8080` — runs an HTTP server with SSE. Clients connect at `http://localhost:8080/sse` with `Authorization: Bearer <token>`, where the host-generated token is stored at `~/.config/folk-around/http-token` with owner-only permissions. Browser-origin requests are rejected. Tunnel via `ssh -L` or Tailscale for remote access.
 
 ### P2P
 `folk-around --p2p` or `folk-around --signal-server <host>` prints a pairing code, joins that signaling room over WebSocket, announces this daemon identity, and starts local HTTP MCP on port 8080 by default. Give the pairing code and signaling server to the client. Peers complete an offer/answer handshake, exchange X25519 public identities, derive relay session keys from the X25519 shared secret with HKDF, and encrypt relayed MCP payloads with XChaCha20-Poly1305 before command execution.
