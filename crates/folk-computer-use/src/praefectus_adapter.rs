@@ -27,12 +27,12 @@ pub(crate) fn execute_click(
 ) -> Result<Option<Value>, ToolExecError> {
     super::ensure_mutation(mode)?;
     if !click_is_candidate(button, count, background) {
-        return Ok(None);
+        return Err(ToolExecError::CoordinatesUnavailable);
     }
     let button = match button {
         "left" => MouseButton::Left,
         "right" => MouseButton::Right,
-        _ => return Ok(None),
+        _ => return Err(ToolExecError::CoordinatesUnavailable),
     };
     try_execute(
         Action::Click {
@@ -57,10 +57,10 @@ pub(crate) fn execute_move(
 fn try_execute(action: Action, x: i64, y: i64) -> Result<Option<Value>, ToolExecError> {
     let executor = NativeExecutor::default();
     let Ok(capabilities) = executor.capabilities() else {
-        return Ok(None);
+        return Err(ToolExecError::CoordinatesUnavailable);
     };
     if !supports_action(&capabilities, action_name(&action)) {
-        return Ok(None);
+        return Err(ToolExecError::CoordinatesUnavailable);
     }
     let observation = executor.observe_coordinates()?;
     let display = observation
@@ -95,6 +95,7 @@ fn try_execute(action: Action, x: i64, y: i64) -> Result<Option<Value>, ToolExec
         protocol_version: PROTOCOL_VERSION,
         action_version: PROTOCOL_VERSION,
         target_version: PROTOCOL_VERSION,
+        verification_version: PROTOCOL_VERSION,
         operation_id: operation_id.clone(),
         subject: subject.clone(),
         session_id: session_id.clone(),
@@ -253,13 +254,20 @@ mod tests {
     }
 
     #[test]
-    fn coordinate_click_routing_preserves_existing_semantics() {
+    fn coordinate_click_candidate_is_narrowly_bounded() {
         assert!(click_is_candidate("left", 1, false));
         assert!(click_is_candidate("right", 3, false));
         assert!(!click_is_candidate("left", 1, true));
         assert!(!click_is_candidate("middle", 1, false));
         assert!(!click_is_candidate("left", 0, false));
         assert!(!click_is_candidate("left", 4, false));
+    }
+
+    #[test]
+    fn raw_background_clicks_fail_closed() {
+        let result = execute_click(AccessMode::Full, 10, 20, "left", 1, true);
+
+        assert!(matches!(result, Err(ToolExecError::CoordinatesUnavailable)));
     }
 
     #[test]

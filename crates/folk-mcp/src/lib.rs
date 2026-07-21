@@ -211,11 +211,11 @@ pub fn handle_message(
                 .cloned()
                 .unwrap_or_else(|| json!({}));
             if verbose {
-                log_status(&format!("tool call: {name} {arguments}"));
+                log_status(&tool_log("started"));
             }
             let result = table.call(name, arguments);
             if verbose {
-                log_status(&format!("tool result: {name} {result}"));
+                log_status(&tool_log("finished"));
             }
             json_response(id, result).map(Some)
         }
@@ -227,6 +227,10 @@ pub fn handle_message(
             }
         }
     }
+}
+
+fn tool_log(status: &str) -> String {
+    format!("tool {status}")
 }
 
 fn log_status(message: &str) {
@@ -313,5 +317,13 @@ mod tests {
         )
         .unwrap();
         assert!(response.is_none());
+    }
+
+    #[test]
+    fn tool_logs_exclude_arguments_and_results() {
+        let message = tool_log("finished");
+
+        assert_eq!(message, "tool finished");
+        assert!(!message.contains("private-text"));
     }
 }

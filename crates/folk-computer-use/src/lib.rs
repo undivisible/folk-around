@@ -7,7 +7,7 @@ use folk_mcp::{
     ToolError, ToolTable, empty_schema, err_result, json_text_result, number_property,
     object_schema, string_property, text_result,
 };
-use rs_peekaboo::automation::{Target, parse_point, validate_output_path};
+use rs_peekaboo::automation::{Target, validate_output_path};
 use rs_peekaboo::{Bounds, Direction, ImageCapture, ImageMode, Peekaboo, PeekabooConfig, Point};
 use serde_json::{Value, json};
 use thiserror::Error;
@@ -37,6 +37,8 @@ enum ToolExecError {
     Json(#[from] serde_json::Error),
     #[error("computer-use protocol request failed")]
     Praefectus(#[from] praefectus::ProtocolError),
+    #[error("raw coordinate actions are unavailable")]
+    CoordinatesUnavailable,
 }
 
 fn peekaboo() -> Peekaboo {
@@ -204,7 +206,7 @@ pub fn register_tools(table: &mut ToolTable) {
     );
     table.register(
         "folk_click",
-        "Click coordinates or a resolved UI element on the Folk Around host computer",
+        "Click a resolved UI element on the Folk Around host computer; raw coordinates require Praefectus artifact provenance",
         schema(
             &[
                 (
@@ -297,7 +299,7 @@ pub fn register_tools(table: &mut ToolTable) {
     );
     table.register(
         "folk_swipe",
-        "Swipe between two coordinates on the Folk Around host computer",
+        "Unavailable until Praefectus supports artifact-bound coordinate endpoints",
         schema(
             &[
                 ("from", string_property("Start coordinate as x,y")),
@@ -313,7 +315,7 @@ pub fn register_tools(table: &mut ToolTable) {
     );
     table.register(
         "folk_drag",
-        "Drag between two coordinates on the Folk Around host computer",
+        "Unavailable until Praefectus supports artifact-bound coordinate endpoints",
         schema(
             &[
                 ("from", string_property("Start coordinate as x,y")),
@@ -329,7 +331,7 @@ pub fn register_tools(table: &mut ToolTable) {
     );
     table.register(
         "folk_move",
-        "Move the pointer on the Folk Around host computer",
+        "Move the pointer to a resolved UI element on the Folk Around host computer; raw coordinates require Praefectus artifact provenance",
         schema(
             &[
                 (
@@ -452,15 +454,6 @@ pub fn register_tools(table: &mut ToolTable) {
             &["action"],
         ),
         |args, mode| Ok(menu(args, mode)),
-    );
-    table.register(
-        "folk_run",
-        "Run a JSON automation script on the Folk Around host computer",
-        schema(
-            &[("file", string_property("Path to the script file"))],
-            &["file"],
-        ),
-        |args, mode| Ok(run_file(args, mode)),
     );
     table.register(
         "folk_sleep",
@@ -852,14 +845,8 @@ fn scroll(args: Value, mode: AccessMode) -> Value {
 fn swipe(args: Value, mode: AccessMode) -> Value {
     let result = (|| {
         ensure_mutation(mode)?;
-        let from = parse_point(str_arg(&args, "from").ok_or(ToolExecError::Missing("from"))?)?;
-        let to = parse_point(str_arg(&args, "to").ok_or(ToolExecError::Missing("to"))?)?;
-        let duration_ms = args
-            .get("duration_ms")
-            .and_then(Value::as_u64)
-            .unwrap_or(250);
-        peekaboo().swipe(Target::Point(from), Target::Point(to), duration_ms)?;
-        Ok(text_result("swiped"))
+        let _ = args;
+        Err(ToolExecError::CoordinatesUnavailable)
     })();
     flatten(result)
 }
@@ -867,14 +854,8 @@ fn swipe(args: Value, mode: AccessMode) -> Value {
 fn drag(args: Value, mode: AccessMode) -> Value {
     let result = (|| {
         ensure_mutation(mode)?;
-        let from = parse_point(str_arg(&args, "from").ok_or(ToolExecError::Missing("from"))?)?;
-        let to = parse_point(str_arg(&args, "to").ok_or(ToolExecError::Missing("to"))?)?;
-        let duration_ms = args
-            .get("duration_ms")
-            .and_then(Value::as_u64)
-            .unwrap_or(250);
-        peekaboo().drag(Target::Point(from), Target::Point(to), duration_ms)?;
-        Ok(text_result("dragged"))
+        let _ = args;
+        Err(ToolExecError::CoordinatesUnavailable)
     })();
     flatten(result)
 }
@@ -961,16 +942,6 @@ fn open_target(args: Value, mode: AccessMode) -> Value {
             .unwrap_or(false);
         peekaboo().open(target, app, no_focus)?;
         Ok(text_result("opened"))
-    })();
-    flatten(result)
-}
-
-fn run_file(args: Value, mode: AccessMode) -> Value {
-    let result = (|| {
-        ensure_mutation(mode)?;
-        let file = str_arg(&args, "file").ok_or(ToolExecError::Missing("file"))?;
-        let results = peekaboo().run_file(&PathBuf::from(file))?;
-        Ok(json_text_result(&json!(results)))
     })();
     flatten(result)
 }
@@ -1330,7 +1301,7 @@ mod tests {
     }
 
     #[test]
-    fn full_coordinate_tools_should_route_through_adapter() {
+    fn full_coordinate_tools_fail_closed_when_adapter_is_unavailable() {
         let calls = Cell::new(0_u32);
         let click_response = click_with_adapter(
             json!({ "x": 10, "y": 20, "button": "right", "count": 2, "background": false }),
@@ -1341,7 +1312,7 @@ mod tests {
                     (AccessMode::Full, 10, 20, "right", 2, false)
                 );
                 calls.set(calls.get() + 1);
-                Ok(Some(json!({ "adapter": "click" })))
+                Err(ToolExecError::CoordinatesUnavailable)
             },
         );
         let move_response = move_pointer_with_adapter(
@@ -1350,18 +1321,32 @@ mod tests {
             |mode, x, y| {
                 assert_eq!((mode, x, y), (AccessMode::Full, 30, 40));
                 calls.set(calls.get() + 1);
-                Ok(Some(json!({ "adapter": "move" })))
+                Err(ToolExecError::CoordinatesUnavailable)
             },
         );
 
-        assert_eq!(
-            (
-                calls.get(),
-                click_response["adapter"].as_str(),
-                move_response["adapter"].as_str(),
-            ),
-            (2, Some("click"), Some("move"))
-        );
+        assert_eq!(calls.get(), 2);
+        for response in [click_response, move_response] {
+            assert!(
+                response
+                    .to_string()
+                    .contains("raw coordinate actions are unavailable")
+            );
+        }
+    }
+
+    #[test]
+    fn full_swipe_and_drag_fail_closed_without_endpoint_provenance() {
+        for response in [
+            swipe(json!({ "from": "10,20", "to": "30,40" }), AccessMode::Full),
+            drag(json!({ "from": "10,20", "to": "30,40" }), AccessMode::Full),
+        ] {
+            assert!(
+                response
+                    .to_string()
+                    .contains("raw coordinate actions are unavailable")
+            );
+        }
     }
 
     #[test]
@@ -1460,7 +1445,6 @@ mod tests {
                 "folk_app",
                 "folk_open",
                 "folk_menu",
-                "folk_run",
                 "folk_sleep",
                 "folk_clean",
             ]

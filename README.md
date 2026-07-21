@@ -28,13 +28,15 @@ folk-around --p2p                        # print pairing code, join signaling, s
 | folk_clipboard_write | write to clipboard |
 | folk_screen_capture | capture display, window, or region |
 | folk_ui_snapshot | inspect app/window context |
-| folk_click | click coordinates |
+| folk_click | click a resolved UI element; raw coordinates fail closed without Praefectus provenance |
 | folk_type | type text |
 | folk_hotkey | press key combinations |
 | folk_scroll | scroll |
 | folk_window | list/focus/window actions |
 | folk_app | list/launch/activate/quit apps |
 | folk_menu | inspect/click menu items |
+
+Raw coordinate click, move, swipe, and drag requests fail closed when Praefectus does not report artifact-bound coordinate capture. Folk Around does not claim durable replay for those requests.
 
 ## transports
 
