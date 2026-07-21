@@ -9,6 +9,7 @@ use thiserror::Error;
 
 const HTTP_BEARER_BYTES: usize = 32;
 const HTTP_BEARER_HEX_LEN: usize = HTTP_BEARER_BYTES * 2;
+const ARTIFACT_ID_BYTES: usize = 16;
 
 pub fn terminal_time() -> String {
     let seconds = std::time::SystemTime::now()
@@ -68,6 +69,14 @@ pub enum ConfigError {
     Io(#[from] std::io::Error),
     #[error("invalid HTTP bearer credential")]
     InvalidHttpBearer,
+    #[error("owner-only file permissions are unavailable")]
+    PrivatePermissionsUnavailable,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub struct ArtifactFile {
+    pub path: PathBuf,
+    pub locator: String,
 }
 
 pub fn load_config() -> Result<AppConfig, ConfigError> {
@@ -133,41 +142,86 @@ pub fn save_config(config: &AppConfig) -> Result<(), ConfigError> {
 }
 
 pub fn load_or_create_http_bearer() -> Result<String, ConfigError> {
-    let dir = config_dir()?;
-    ensure_private_dir(&dir)?;
-    let path = dir.join("http-token");
+    #[cfg(not(unix))]
+    return Err(ConfigError::PrivatePermissionsUnavailable);
 
-    match open_new_private_file(&path) {
-        Ok(mut file) => {
-            let token = generate_http_bearer();
-            file.write_all(token.as_bytes())?;
-            file.sync_all()?;
-            sync_dir(&dir)?;
-            Ok(token)
-        }
-        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
-            let metadata = fs::symlink_metadata(&path)?;
-            if !metadata.file_type().is_file() || metadata.len() != HTTP_BEARER_HEX_LEN as u64 {
-                return Err(ConfigError::InvalidHttpBearer);
+    #[cfg(unix)]
+    {
+        let dir = config_dir()?;
+        ensure_private_dir(&dir)?;
+        let path = dir.join("http-token");
+
+        match open_new_private_file(&path) {
+            Ok(mut file) => {
+                let token = generate_http_bearer();
+                file.write_all(token.as_bytes())?;
+                file.sync_all()?;
+                sync_dir(&dir)?;
+                Ok(token)
             }
-            restrict_file_permissions(&path)?;
-            let mut token = String::with_capacity(HTTP_BEARER_HEX_LEN);
-            File::open(path)?
-                .take((HTTP_BEARER_HEX_LEN + 1) as u64)
-                .read_to_string(&mut token)?;
-            if !valid_http_bearer(&token) {
-                return Err(ConfigError::InvalidHttpBearer);
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+                let metadata = fs::symlink_metadata(&path)?;
+                if !metadata.file_type().is_file() || metadata.len() != HTTP_BEARER_HEX_LEN as u64 {
+                    return Err(ConfigError::InvalidHttpBearer);
+                }
+                restrict_file_permissions(&path)?;
+                let mut token = String::with_capacity(HTTP_BEARER_HEX_LEN);
+                File::open(path)?
+                    .take((HTTP_BEARER_HEX_LEN + 1) as u64)
+                    .read_to_string(&mut token)?;
+                if !valid_http_bearer(&token) {
+                    return Err(ConfigError::InvalidHttpBearer);
+                }
+                Ok(token)
             }
-            Ok(token)
+            Err(err) => Err(err.into()),
         }
-        Err(err) => Err(err.into()),
+    }
+}
+
+pub fn create_artifact_file() -> Result<ArtifactFile, ConfigError> {
+    #[cfg(not(unix))]
+    return Err(ConfigError::PrivatePermissionsUnavailable);
+
+    #[cfg(unix)]
+    {
+        let config = config_dir()?;
+        ensure_private_dir(&config)?;
+        let dir = config.join("artifacts");
+        ensure_private_dir(&dir)?;
+
+        for _ in 0..16 {
+            let id = generate_hex::<ARTIFACT_ID_BYTES>();
+            let name = format!("{id}.png");
+            let path = dir.join(&name);
+            match open_new_private_file(&path) {
+                Ok(file) => {
+                    file.sync_all()?;
+                    sync_dir(&dir)?;
+                    return Ok(ArtifactFile {
+                        path,
+                        locator: format!("folk-artifact:{name}"),
+                    });
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(err) => return Err(err.into()),
+            }
+        }
+        Err(ConfigError::Io(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "artifact identifier collision",
+        )))
     }
 }
 
 fn generate_http_bearer() -> String {
-    let mut bytes = [0_u8; HTTP_BEARER_BYTES];
+    generate_hex::<HTTP_BEARER_BYTES>()
+}
+
+fn generate_hex<const N: usize>() -> String {
+    let mut bytes = [0_u8; N];
     rand::rng().fill_bytes(&mut bytes);
-    let mut token = String::with_capacity(HTTP_BEARER_HEX_LEN);
+    let mut token = String::with_capacity(N * 2);
     for byte in bytes {
         write!(token, "{byte:02x}").expect("writing to a String cannot fail");
     }

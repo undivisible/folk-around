@@ -26,7 +26,7 @@ folk-around --p2p                        # print pairing code, join signaling, s
 | folk_spawn | spawn background (full mode) |
 | folk_clipboard_read | read clipboard |
 | folk_clipboard_write | write to clipboard |
-| folk_screen_capture | capture display, window, or region |
+| folk_screen_capture | capture to a private host-owned artifact and return its hash/locator |
 | folk_ui_snapshot | inspect app/window context |
 | folk_click | click a resolved UI element; raw coordinates fail closed without Praefectus provenance |
 | folk_type | type text |
@@ -37,6 +37,7 @@ folk-around --p2p                        # print pairing code, join signaling, s
 | folk_menu | inspect/click menu items |
 
 Raw coordinate click, move, swipe, and drag requests fail closed when Praefectus does not report artifact-bound coordinate capture. Folk Around does not claim durable replay for those requests.
+Screenshot tools allocate files under the owner-only Folk Around artifact directory and never accept caller-selected paths or embed image bytes in MCP payloads.
 
 ## transports
 
@@ -47,7 +48,7 @@ Standard MCP over stdin/stdout. Pipe to any MCP client. Use `folk-around --stdio
 Running `folk-around` with no transport flags reuses the saved HTTP port under `~/.config/folk-around/config`. If no HTTP port is saved, it falls back to stdio. Use `--p2p` to reuse the saved signaling server and pairing code.
 
 ### HTTP SSE
-`folk-around --http 8080` — runs an HTTP server with SSE. Clients connect at `http://localhost:8080/sse` with `Authorization: Bearer <token>`, where the host-generated token is stored at `~/.config/folk-around/http-token` with owner-only permissions. Browser-origin requests are rejected. Tunnel via `ssh -L` or Tailscale for remote access.
+`folk-around --http 8080` — runs an HTTP server with SSE on Unix hosts. Clients connect at `http://localhost:8080/sse` with `Authorization: Bearer <token>`, where the host-generated token is stored at `~/.config/folk-around/http-token` with owner-only permissions. Browser-origin requests are rejected. HTTP fails closed where owner-only credential permissions cannot be enforced. Tunnel via `ssh -L` or Tailscale for remote access.
 
 ### P2P
 `folk-around --p2p` or `folk-around --signal-server <host>` prints a pairing code, joins that signaling room over WebSocket, announces this daemon identity, and starts local HTTP MCP on port 8080 by default. Give the pairing code and signaling server to the client. Peers complete an offer/answer handshake, exchange X25519 public identities, derive relay session keys from the X25519 shared secret with HKDF, and encrypt relayed MCP payloads with XChaCha20-Poly1305 before command execution.

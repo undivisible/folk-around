@@ -1,4 +1,3 @@
-use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 #[cfg(unix)]
 use std::{
@@ -11,7 +10,7 @@ use folk_mcp::{
     ToolError, ToolTable, empty_schema, err_result, json_text_result, number_property,
     object_schema, string_property, text_result,
 };
-use rs_peekaboo::automation::{Target, validate_output_path};
+use rs_peekaboo::automation::Target;
 use rs_peekaboo::{Bounds, Direction, ImageCapture, ImageMode, Peekaboo, PeekabooConfig, Point};
 use serde_json::{Value, json};
 #[cfg(unix)]
@@ -113,17 +112,13 @@ pub fn register_tools(table: &mut ToolTable) {
         schema(
             &[
                 ("mode", string_property("Capture mode: screen or window")),
-                (
-                    "path",
-                    string_property("Output path on the Folk Around host computer"),
-                ),
                 ("retina", bool_property("Capture at retina scale")),
                 (
                     "app",
                     string_property("Optional app name for window-scoped capture"),
                 ),
             ],
-            &["path"],
+            &[],
         ),
         |args, mode| Ok(image(args, mode)),
     );
@@ -134,13 +129,9 @@ pub fn register_tools(table: &mut ToolTable) {
             &[
                 ("app", string_property("Optional app filter")),
                 ("mode", string_property("Capture mode: screen or window")),
-                (
-                    "path",
-                    string_property("Output path on the Folk Around host computer"),
-                ),
                 ("retina", bool_property("Capture at retina scale")),
             ],
-            &["path"],
+            &[],
         ),
         |args, mode| Ok(see(args, mode)),
     );
@@ -195,16 +186,12 @@ pub fn register_tools(table: &mut ToolTable) {
                     "target",
                     string_property("Capture target: display, window, or region"),
                 ),
-                (
-                    "path",
-                    string_property("Output path on the Folk Around host computer"),
-                ),
                 ("x", number_property("Region x coordinate")),
                 ("y", number_property("Region y coordinate")),
                 ("width", number_property("Region width")),
                 ("height", number_property("Region height")),
             ],
-            &["path"],
+            &[],
         ),
         |args, mode| Ok(screen_capture(args, mode)),
     );
@@ -594,7 +581,9 @@ fn screen_capture(args: Value, _mode: AccessMode) -> Value {
 
         ensure_screenshot_reference_supported()?;
         let target = str_arg(&args, "target").unwrap_or("display");
-        let path = required_output_path(&args)?;
+        let artifact = folk_core::create_artifact_file()
+            .map_err(|_| ToolExecError::ScreenshotReferenceUnavailable)?;
+        let path = artifact.path;
         let capture = if target == "region" {
             let x = int_arg(&args, "x").unwrap_or(0);
             let y = int_arg(&args, "y").unwrap_or(0);
@@ -608,21 +597,21 @@ fn screen_capture(args: Value, _mode: AccessMode) -> Value {
                         width,
                         height,
                     },
-                    Some(path),
+                    Some(path.clone()),
                     true,
                 )?
             } else {
-                peekaboo().image(ImageMode::Screen, Some(path), true)?
+                peekaboo().image(ImageMode::Screen, Some(path.clone()), true)?
             }
         } else if target == "window" {
-            peekaboo().image(ImageMode::Window, Some(path), true)?
+            peekaboo().image(ImageMode::Window, Some(path.clone()), true)?
         } else {
-            peekaboo().image(ImageMode::Screen, Some(path), true)?
+            peekaboo().image(ImageMode::Screen, Some(path.clone()), true)?
         };
         let metadata = json!({
             "target": target,
         });
-        image_result(metadata, &capture)
+        image_result(metadata, &capture, &artifact.locator)
     })();
     flatten(result)
 }
@@ -630,18 +619,20 @@ fn screen_capture(args: Value, _mode: AccessMode) -> Value {
 fn image(args: Value, _mode: AccessMode) -> Value {
     let result = (|| {
         ensure_screenshot_reference_supported()?;
-        let path = required_output_path(&args)?;
+        let artifact = folk_core::create_artifact_file()
+            .map_err(|_| ToolExecError::ScreenshotReferenceUnavailable)?;
+        let path = artifact.path;
         let retina = args.get("retina").and_then(Value::as_bool).unwrap_or(true);
         let capture = if let Some(app) = str_arg(&args, "app") {
-            peekaboo().image_app(app, Some(path), retina)?
+            peekaboo().image_app(app, Some(path.clone()), retina)?
         } else {
             let capture_mode = ImageMode::parse_or_err(str_arg(&args, "mode").unwrap_or("screen"))?;
-            peekaboo().image(capture_mode, Some(path), retina)?
+            peekaboo().image(capture_mode, Some(path.clone()), retina)?
         };
         let metadata = json!({
             "mode": capture.mode,
         });
-        image_result(metadata, &capture)
+        image_result(metadata, &capture, &artifact.locator)
     })();
     flatten(result)
 }
@@ -651,9 +642,12 @@ fn see(args: Value, _mode: AccessMode) -> Value {
         ensure_screenshot_reference_supported()?;
         let app = str_arg(&args, "app");
         let capture_mode = ImageMode::parse_or_err(str_arg(&args, "mode").unwrap_or("screen"))?;
-        let path = required_output_path(&args)?;
+        let artifact = folk_core::create_artifact_file()
+            .map_err(|_| ToolExecError::ScreenshotReferenceUnavailable)?;
+        let path = artifact.path;
         let retina = args.get("retina").and_then(Value::as_bool).unwrap_or(true);
         // see() assigns stable element indices.
+        // see may skip writing image when path is None; still try one capture for image payload.
         let snapshot = peekaboo().see(app, capture_mode, Some(path.clone()), retina)?;
         let capture = ImageCapture {
             bytes: std::fs::metadata(&path)?.len(),
@@ -667,7 +661,7 @@ fn see(args: Value, _mode: AccessMode) -> Value {
             "elements": snapshot.elements,
             "mode": capture.mode,
         });
-        image_result(metadata, &capture)
+        image_result(metadata, &capture, &artifact.locator)
     })();
     flatten(result)
 }
@@ -1081,7 +1075,11 @@ fn flatten(result: Result<Value, ToolExecError>) -> Value {
     }
 }
 
-fn image_result(value: Value, capture: &ImageCapture) -> Result<Value, ToolExecError> {
+fn image_result(
+    value: Value,
+    capture: &ImageCapture,
+    locator: &str,
+) -> Result<Value, ToolExecError> {
     if capture.ephemeral {
         let _ = std::fs::remove_file(&capture.path);
         return Err(ToolExecError::ScreenshotReferenceUnavailable);
@@ -1089,6 +1087,7 @@ fn image_result(value: Value, capture: &ImageCapture) -> Result<Value, ToolExecE
     let artifact = screenshot_reference(capture);
     let mut value = value;
     value["artifact"] = artifact?;
+    value["artifact"]["locator"] = json!(locator);
     let text = serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string());
     Ok(json!({
         "content": [{ "type": "text", "text": text }],
@@ -1143,35 +1142,6 @@ fn screenshot_reference(capture: &ImageCapture) -> Result<Value, ToolExecError> 
 
 #[cfg(not(unix))]
 fn screenshot_reference(_capture: &ImageCapture) -> Result<Value, ToolExecError> {
-    Err(ToolExecError::ScreenshotReferenceUnavailable)
-}
-
-fn required_output_path(args: &Value) -> Result<PathBuf, ToolExecError> {
-    let path = str_arg(args, "path").ok_or(ToolExecError::ScreenshotReferenceUnavailable)?;
-    let path = validate_output_path(Path::new(path)).map_err(ToolExecError::Peekaboo)?;
-    restrict_output_path(&path)?;
-    Ok(path)
-}
-
-#[cfg(unix)]
-fn restrict_output_path(path: &Path) -> Result<(), ToolExecError> {
-    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-
-    let file = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .mode(0o600)
-        .open(path)?;
-    file.set_permissions(Permissions::from_mode(0o600))?;
-    if file.metadata()?.permissions().mode() & 0o077 != 0 {
-        return Err(ToolExecError::ScreenshotReferenceUnavailable);
-    }
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn restrict_output_path(_path: &Path) -> Result<(), ToolExecError> {
     Err(ToolExecError::ScreenshotReferenceUnavailable)
 }
 
@@ -1473,12 +1443,21 @@ mod tests {
             mime_type: "image/png".to_string(),
             ephemeral: false,
         };
-        let response = image_result(json!({ "mode": "screen" }), &capture).unwrap();
+        let response = image_result(
+            json!({ "mode": "screen" }),
+            &capture,
+            "folk-artifact:test.png",
+        )
+        .unwrap();
         let content = response["content"].as_array().unwrap();
 
         assert_eq!(
             response["structuredContent"]["artifact"]["contentHash"],
             "sha256:9f64a747e1b97f131fabb6b447296c9b6f0201e79fb3c5356e6c77e89b6a806a"
+        );
+        assert_eq!(
+            response["structuredContent"]["artifact"]["locator"],
+            "folk-artifact:test.png"
         );
         assert_eq!(content.len(), 1);
         assert_eq!(content[0]["type"], "text");
@@ -1513,7 +1492,11 @@ mod tests {
             mime_type: "image/png".to_string(),
             ephemeral: true,
         };
-        let result = image_result(json!({ "mode": "screen" }), &capture);
+        let result = image_result(
+            json!({ "mode": "screen" }),
+            &capture,
+            "folk-artifact:test.png",
+        );
 
         assert!(matches!(
             result,
@@ -1566,5 +1549,17 @@ mod tests {
                 "folk_clean",
             ]
         );
+        for tool in table
+            .list()
+            .iter()
+            .filter(|tool| matches!(tool.name, "folk_image" | "folk_see" | "folk_screen_capture"))
+        {
+            assert!(
+                tool.input_schema
+                    .get("properties")
+                    .and_then(|value| value.get("path"))
+                    .is_none()
+            );
+        }
     }
 }
