@@ -4,13 +4,13 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "folk-around computer-use tools (shell, clipboard, UI, peekaboo)"
+description = "folk-around shell, clipboard, semantic UI, and bounded capture tools"
 
 [dependencies]
 ed25519-dalek = { version = "2.1", default-features = false, features = ["std"] }
 folk-core = { path = "../folk-core", version = "0.3.4" }
 folk-mcp = { path = "../folk-mcp", version = "0.3.4" }
-praefectus = "=0.2.0"
+praefectus = "=0.3.0"
 rand.workspace = true
 rs_peekaboo.workspace = true
 serde_json.workspace = true

@@ -58,6 +58,10 @@ impl ToolTable {
         &self.tools
     }
 
+    pub fn retain(&mut self, mut keep: impl FnMut(&Tool) -> bool) {
+        self.tools.retain(|tool| keep(tool));
+    }
+
     pub fn call(&self, name: &str, arguments: Value) -> Value {
         for tool in &self.tools {
             if tool.name == name {

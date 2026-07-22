@@ -1,94 +1,144 @@
+use std::collections::VecDeque;
 use std::path::PathBuf;
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use ed25519_dalek::{Signer, SigningKey};
 use folk_core::AccessMode;
 use folk_mcp::json_text_result;
+use praefectus::semantic::{SemanticObservation, SemanticTargetRef};
 use praefectus::{
     Action, ActionRequest, AuthorityGrant, CancellationToken, Capabilities,
-    Ed25519AuthorityVerifier, Engine, ExecuteReport, Executor, MouseButton, NativeExecutor,
+    Ed25519AuthorityVerifier, Engine, ExecuteReport, Executor, InteractionMode, NativeExecutor,
     PROTOCOL_VERSION, SafetyClass, SignedAuthority, TargetRef, Terminal, VerificationPolicy,
     canonical_authority_bytes, normalized_action_hash,
 };
 use serde_json::{Value, json, to_value};
+use sha2::{Digest, Sha256};
 
 use crate::ToolExecError;
 
+const MAX_CACHED_OBSERVATIONS: usize = 8;
+const ACTION_DEADLINE_MS: i64 = 30_000;
+
 static HOST_AUTHORITY: OnceLock<(SigningKey, String)> = OnceLock::new();
+static OBSERVATIONS: OnceLock<Mutex<VecDeque<SemanticObservation>>> = OnceLock::new();
+
+pub(crate) fn supports_semantic_action(action: &str) -> bool {
+    NativeExecutor::default()
+        .capabilities()
+        .is_ok_and(|capabilities| supports_action(&capabilities, action))
+}
+
+pub(crate) fn observe_semantic() -> Result<SemanticObservation, ToolExecError> {
+    let executor = NativeExecutor::default();
+    let cancellation = CancellationToken::default();
+    let observation =
+        executor.observe_semantic(&cancellation, now_ms()?.saturating_add(ACTION_DEADLINE_MS))?;
+    cache_observation(observation.clone())?;
+    Ok(observation)
+}
 
 pub(crate) fn execute_click(
     mode: AccessMode,
-    x: i64,
-    y: i64,
-    button: &str,
-    count: u32,
-    background: bool,
-) -> Result<Option<Value>, ToolExecError> {
+    operation_id: &str,
+    observation_id: &str,
+    tag: &str,
+    interaction_mode: InteractionMode,
+) -> Result<Value, ToolExecError> {
     super::ensure_mutation(mode)?;
-    if !click_is_candidate(button, count, background) {
-        return Err(ToolExecError::CoordinatesUnavailable);
-    }
-    let button = match button {
-        "left" => MouseButton::Left,
-        "right" => MouseButton::Right,
-        _ => return Err(ToolExecError::CoordinatesUnavailable),
-    };
-    try_execute(
-        Action::Click {
-            button,
-            count,
-            allow_coordinate_fallback: false,
+    let (target, deadline_at_ms) = cached_target(observation_id, tag)?;
+    execute_semantic(
+        Action::Invoke,
+        target,
+        operation_id,
+        deadline_at_ms,
+        interaction_mode,
+    )
+}
+
+pub(crate) fn execute_set_value(
+    mode: AccessMode,
+    operation_id: &str,
+    observation_id: &str,
+    tag: &str,
+    value: &str,
+    interaction_mode: InteractionMode,
+) -> Result<Value, ToolExecError> {
+    super::ensure_mutation(mode)?;
+    let (target, deadline_at_ms) = cached_target(observation_id, tag)?;
+    execute_semantic(
+        Action::SetValue {
+            value: value.to_string(),
         },
-        x,
-        y,
+        target,
+        operation_id,
+        deadline_at_ms,
+        interaction_mode,
     )
 }
 
 pub(crate) fn execute_move(
     mode: AccessMode,
-    x: i64,
-    y: i64,
+    _x: i64,
+    _y: i64,
 ) -> Result<Option<Value>, ToolExecError> {
     super::ensure_mutation(mode)?;
-    try_execute(Action::Move, x, y)
+    Err(ToolExecError::CoordinatesUnavailable)
 }
 
-fn try_execute(action: Action, x: i64, y: i64) -> Result<Option<Value>, ToolExecError> {
+fn execute_semantic(
+    action: Action,
+    target: SemanticTargetRef,
+    operation_id: &str,
+    deadline_at_ms: i64,
+    interaction_mode: InteractionMode,
+) -> Result<Value, ToolExecError> {
     let executor = NativeExecutor::default();
-    let Ok(capabilities) = executor.capabilities() else {
-        return Err(ToolExecError::CoordinatesUnavailable);
-    };
+    let capabilities = executor.capabilities()?;
     if !supports_action(&capabilities, action_name(&action)) {
-        return Err(ToolExecError::CoordinatesUnavailable);
+        return Err(ToolExecError::SemanticUnavailable);
     }
-    let observation = executor.observe_coordinates()?;
-    let display = observation
-        .displays
-        .iter()
-        .find(|display| {
-            display.width > 0
-                && display.height > 0
-                && x >= display.x
-                && y >= display.y
-                && x < display.x.saturating_add(display.width)
-                && y < display.y.saturating_add(display.height)
-        })
-        .ok_or(ToolExecError::Missing("coordinate on a display"))?;
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(std::io::Error::other)?
-        .as_millis() as i64;
     let (signing_key, session_id) = HOST_AUTHORITY.get_or_init(|| {
         (
             SigningKey::from_bytes(&rand::random()),
             format!("folk-process-{:032x}", rand::random::<u128>()),
         )
     });
-    let operation_id = new_operation_id();
+    let request = signed_request(
+        action,
+        target,
+        operation_id,
+        deadline_at_ms,
+        signing_key,
+        session_id,
+        interaction_mode,
+    )?;
+    let grant = &request.authority.grant;
+    let verifier = Ed25519AuthorityVerifier::new([(
+        grant.issuer.clone(),
+        grant.key_id.clone(),
+        grant.policy_generation.clone(),
+        signing_key.verifying_key(),
+    )])?;
+    let report = Engine::new(executor, ledger_path()?, verifier)
+        .execute(&request, &CancellationToken::default())?;
+    report_result(report)
+}
+
+fn signed_request(
+    action: Action,
+    target: SemanticTargetRef,
+    operation_id: &str,
+    deadline_at_ms: i64,
+    signing_key: &SigningKey,
+    session_id: &str,
+    interaction_mode: InteractionMode,
+) -> Result<ActionRequest, ToolExecError> {
+    let operation_id = operation_id.to_string();
     let issuer = "folk-around".to_string();
     let key_id = "process-key".to_string();
-    let policy_generation = "folk-full-v1".to_string();
+    let policy_generation = "folk-full-v2".to_string();
     let subject = "folk-local-host".to_string();
     let (safety, verification) = action_policy(&action);
     let mut request = ActionRequest {
@@ -98,7 +148,7 @@ fn try_execute(action: Action, x: i64, y: i64) -> Result<Option<Value>, ToolExec
         verification_version: PROTOCOL_VERSION,
         operation_id: operation_id.clone(),
         subject: subject.clone(),
-        session_id: session_id.clone(),
+        session_id: session_id.to_string(),
         authority: SignedAuthority {
             grant: AuthorityGrant {
                 protocol_version: PROTOCOL_VERSION,
@@ -106,24 +156,18 @@ fn try_execute(action: Action, x: i64, y: i64) -> Result<Option<Value>, ToolExec
                 key_id: key_id.clone(),
                 operation_id,
                 subject,
-                session_id: session_id.clone(),
+                session_id: session_id.to_string(),
                 risk: safety,
-                expires_at_ms: now + 30_000,
+                expires_at_ms: deadline_at_ms,
                 policy_generation: policy_generation.clone(),
                 action_hash: String::new(),
             },
             signature: String::new(),
         },
         action,
-        target: TargetRef::Coordinates {
-            x,
-            y,
-            display_id: display.display_id.clone(),
-            display_geometry_hash: observation.display_geometry_hash,
-            snapshot_id: observation.snapshot_id,
-            snapshot_content_hash: observation.snapshot_content_hash,
-        },
-        deadline_at_ms: now + 30_000,
+        target: TargetRef::Element { target },
+        interaction_mode,
+        deadline_at_ms,
         verification,
         safety,
     };
@@ -134,36 +178,51 @@ fn try_execute(action: Action, x: i64, y: i64) -> Result<Option<Value>, ToolExec
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect();
-    let verifier = Ed25519AuthorityVerifier::new([(
-        issuer,
-        key_id,
-        policy_generation,
-        signing_key.verifying_key(),
-    )]);
-    let report = Engine::new(executor, ledger_path()?, verifier)
-        .execute(&request, &CancellationToken::default())?;
-    report_result(report).map(Some)
+    Ok(request)
 }
 
-fn click_is_candidate(button: &str, count: u32, background: bool) -> bool {
-    !background && matches!(button, "left" | "right") && (1..=3).contains(&count)
+fn cache_observation(observation: SemanticObservation) -> Result<(), ToolExecError> {
+    observation.validate(now_ms()?)?;
+    let cache = OBSERVATIONS.get_or_init(|| Mutex::new(VecDeque::new()));
+    let mut observations = cache
+        .lock()
+        .map_err(|_| ToolExecError::SemanticUnavailable)?;
+    let now = now_ms()?;
+    observations.retain(|cached| cached.expires_at_ms > now);
+    observations.retain(|cached| cached.observation_id != observation.observation_id);
+    observations.push_back(observation);
+    while observations.len() > MAX_CACHED_OBSERVATIONS {
+        observations.pop_front();
+    }
+    Ok(())
+}
+
+fn cached_target(
+    observation_id: &str,
+    tag: &str,
+) -> Result<(SemanticTargetRef, i64), ToolExecError> {
+    let cache = OBSERVATIONS.get_or_init(|| Mutex::new(VecDeque::new()));
+    let observations = cache
+        .lock()
+        .map_err(|_| ToolExecError::SemanticUnavailable)?;
+    let observation = observations
+        .iter()
+        .find(|observation| observation.observation_id == observation_id)
+        .ok_or(ToolExecError::SemanticUnavailable)?;
+    observation.validate(now_ms()?)?;
+    Ok((observation.target(tag)?, observation.expires_at_ms))
 }
 
 fn action_name(action: &Action) -> &'static str {
     match action {
-        Action::Click { .. } => "click",
-        Action::Move => "move",
+        Action::Invoke => "invoke",
         Action::SetValue { .. } => "set_value",
         _ => "",
     }
 }
 
 fn supports_action(capabilities: &Capabilities, action: &str) -> bool {
-    capabilities
-        .permissions
-        .get("coordinate_capture")
-        .copied()
-        .unwrap_or(false)
+    !action.is_empty()
         && capabilities
             .supported_actions
             .iter()
@@ -171,10 +230,20 @@ fn supports_action(capabilities: &Capabilities, action: &str) -> bool {
 }
 
 fn action_policy(action: &Action) -> (SafetyClass, VerificationPolicy) {
-    match action {
-        Action::Move => (SafetyClass::Reversible, VerificationPolicy::None),
-        _ => (SafetyClass::External, VerificationPolicy::SnapshotChanged),
-    }
+    let verification = match action {
+        Action::SetValue { value } => VerificationPolicy::TargetValueHash {
+            sha256: value_hash(value),
+        },
+        _ => VerificationPolicy::None,
+    };
+    (SafetyClass::External, verification)
+}
+
+fn value_hash(value: &str) -> String {
+    Sha256::digest(value.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 fn report_result(report: ExecuteReport) -> Result<Value, ToolExecError> {
@@ -185,8 +254,11 @@ fn report_result(report: ExecuteReport) -> Result<Value, ToolExecError> {
     })))
 }
 
-fn new_operation_id() -> String {
-    format!("folk-{:032x}", rand::random::<u128>())
+fn now_ms() -> Result<i64, ToolExecError> {
+    Ok(SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(std::io::Error::other)?
+        .as_millis() as i64)
 }
 
 fn ledger_path() -> Result<PathBuf, ToolExecError> {
@@ -243,50 +315,189 @@ fn terminal_proves_no_effect(terminal: &Terminal) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use praefectus::semantic::{
+        Actionability, SemanticBackend, SemanticElement, SemanticProvenance,
+    };
     use praefectus::{AckState, ActionAck, Effect, FailureCode, Receipt};
 
     use super::*;
 
+    fn observation(now: i64) -> SemanticObservation {
+        let observation_id = "1".repeat(64);
+        SemanticObservation {
+            protocol_version: PROTOCOL_VERSION,
+            observation_id: observation_id.clone(),
+            generation: 1,
+            provenance: SemanticProvenance {
+                backend: SemanticBackend::Accessibility,
+                backend_name: "test".to_string(),
+                process_id: 1,
+                process_generation: "generation".to_string(),
+                window_id: "window".to_string(),
+                document_id: None,
+                display_geometry_hash: "2".repeat(64),
+            },
+            observed_at_ms: now,
+            expires_at_ms: now + 30_000,
+            truncated: false,
+            elements: vec![SemanticElement {
+                tag: "e0".to_string(),
+                element_id: "3".repeat(64),
+                parent_id: None,
+                fingerprint_hash: "4".repeat(64),
+                role: "button".to_string(),
+                name: Some("Save".to_string()),
+                bounds: None,
+                actionability: Actionability {
+                    visible: true,
+                    enabled: true,
+                    unambiguous: true,
+                    stable: true,
+                    receives_events: true,
+                    invokable: true,
+                    editable: false,
+                },
+            }],
+        }
+    }
+
     #[test]
-    fn full_access_check_precedes_authority_issuance() {
-        let result = execute_move(AccessMode::Limited, 0, 0);
+    fn full_access_check_precedes_semantic_target_lookup() {
+        let result = execute_click(
+            AccessMode::Limited,
+            "op",
+            "missing",
+            "e0",
+            InteractionMode::Interactive,
+        );
         assert!(matches!(result, Err(ToolExecError::Blocked)));
     }
 
     #[test]
-    fn coordinate_click_candidate_is_narrowly_bounded() {
-        assert!(click_is_candidate("left", 1, false));
-        assert!(click_is_candidate("right", 3, false));
-        assert!(!click_is_candidate("left", 1, true));
-        assert!(!click_is_candidate("middle", 1, false));
-        assert!(!click_is_candidate("left", 0, false));
-        assert!(!click_is_candidate("left", 4, false));
+    fn cached_semantic_targets_are_observation_and_tag_bound() {
+        let now = now_ms().expect("time should resolve");
+        let observation = observation(now);
+        cache_observation(observation.clone()).expect("observation should cache");
+        let (target, deadline_at_ms) =
+            cached_target(&observation.observation_id, "e0").expect("target should resolve");
+
+        assert_eq!(target.observation_id, observation.observation_id);
+        assert_eq!(deadline_at_ms, observation.expires_at_ms);
+        assert!(cached_target("f", "e0").is_err());
+        assert!(cached_target(&observation.observation_id, "e1").is_err());
     }
 
     #[test]
-    fn raw_background_clicks_fail_closed() {
-        let result = execute_click(AccessMode::Full, 10, 20, "left", 1, true);
+    fn identical_operation_proposals_have_a_stable_canonical_hash() {
+        let now = now_ms().expect("time should resolve");
+        let observation = observation(now);
+        let target = observation.target("e0").expect("target should resolve");
+        let signing_key = SigningKey::from_bytes(&[7; 32]);
+        let action = Action::Invoke;
+        let first = signed_request(
+            action.clone(),
+            target.clone(),
+            "operation:1",
+            observation.expires_at_ms,
+            &signing_key,
+            "session:1",
+            InteractionMode::Interactive,
+        )
+        .expect("request should build");
+        let second = signed_request(
+            action,
+            target,
+            "operation:1",
+            observation.expires_at_ms,
+            &signing_key,
+            "session:1",
+            InteractionMode::Interactive,
+        )
+        .expect("request should replay");
 
-        assert!(matches!(result, Err(ToolExecError::CoordinatesUnavailable)));
+        assert_eq!(
+            normalized_action_hash(&first).expect("first hash should resolve"),
+            normalized_action_hash(&second).expect("second hash should resolve")
+        );
+        assert_eq!(
+            to_value(first.authority).expect("first authority should serialize"),
+            to_value(second.authority).expect("second authority should serialize")
+        );
     }
 
     #[test]
-    fn coordinate_routing_requires_capture_and_exact_action_support() {
-        let mut capabilities = Capabilities {
+    fn semantic_routing_requires_exact_action_support() {
+        let capabilities = Capabilities {
             platform: "test".to_string(),
             backend: "test".to_string(),
-            supported_actions: vec!["click".to_string()],
-            permissions: [("coordinate_capture".to_string(), true)]
-                .into_iter()
-                .collect(),
+            session_isolation: praefectus::SessionIsolation::SharedDesktop,
+            supported_actions: vec!["invoke".to_string()],
+            action_capabilities: vec![praefectus::ActionCapability {
+                action: "invoke".to_string(),
+                delivery_route: praefectus::DeliveryRoute::TargetAddressed,
+                background_support: praefectus::BackgroundSupport::Guarded,
+            }],
+            permissions: Default::default(),
             display_geometry_hash: "0".repeat(64),
         };
-        assert!(supports_action(&capabilities, "click"));
-        assert!(!supports_action(&capabilities, "move"));
-        capabilities
-            .permissions
-            .insert("coordinate_capture".to_string(), false);
-        assert!(!supports_action(&capabilities, "click"));
+        assert!(supports_action(&capabilities, "invoke"));
+        assert!(!supports_action(&capabilities, "set_value"));
+        assert!(!supports_action(&capabilities, ""));
+    }
+
+    #[test]
+    fn invoke_is_external_and_explicitly_unverified() {
+        let (safety, verification) = action_policy(&Action::Invoke);
+
+        assert_eq!(safety, SafetyClass::External);
+        assert!(matches!(verification, VerificationPolicy::None));
+    }
+
+    #[test]
+    fn interaction_mode_changes_the_authorized_action_hash() {
+        let now = now_ms().expect("time should resolve");
+        let observation = observation(now);
+        let target = observation.target("e0").expect("target should resolve");
+        let signing_key = SigningKey::from_bytes(&[7; 32]);
+        let interactive = signed_request(
+            Action::Invoke,
+            target.clone(),
+            "operation:1",
+            observation.expires_at_ms,
+            &signing_key,
+            "session:1",
+            InteractionMode::Interactive,
+        )
+        .expect("interactive request should build");
+        let background = signed_request(
+            Action::Invoke,
+            target,
+            "operation:1",
+            observation.expires_at_ms,
+            &signing_key,
+            "session:1",
+            InteractionMode::BackgroundOnly,
+        )
+        .expect("background request should build");
+
+        assert_ne!(
+            normalized_action_hash(&interactive).expect("interactive hash should resolve"),
+            normalized_action_hash(&background).expect("background hash should resolve")
+        );
+    }
+
+    #[test]
+    fn set_value_is_external_and_verifies_the_typed_value_hash() {
+        let (safety, verification) = action_policy(&Action::SetValue {
+            value: "value".to_string(),
+        });
+
+        assert_eq!(safety, SafetyClass::External);
+        assert!(matches!(
+            verification,
+            VerificationPolicy::TargetValueHash { sha256 }
+                if sha256 == "cd42404d52ad55ccfa9aca4adc828aa5800ad9d385a0671fbcbf724118320619"
+        ));
     }
 
     #[test]
@@ -314,42 +525,6 @@ mod tests {
                 ledger_path_from(None, Some(PathBuf::from("relative-home"))),
             ),
             (None, None)
-        );
-    }
-
-    #[test]
-    fn click_authority_uses_external_risk() {
-        let (safety, verification) = action_policy(&Action::Click {
-            button: MouseButton::Left,
-            count: 1,
-            allow_coordinate_fallback: false,
-        });
-
-        assert!(
-            safety == SafetyClass::External
-                && matches!(verification, VerificationPolicy::SnapshotChanged)
-        );
-    }
-
-    #[test]
-    fn move_authority_is_reversible_without_verification() {
-        let (safety, verification) = action_policy(&Action::Move);
-
-        assert!(
-            safety == SafetyClass::Reversible && matches!(verification, VerificationPolicy::None)
-        );
-    }
-
-    #[test]
-    fn operation_ids_are_random_and_fixed_width() {
-        let first = new_operation_id();
-        let second = new_operation_id();
-        assert_ne!(first, second);
-        assert_eq!(first.len(), 37);
-        assert!(
-            first
-                .strip_prefix("folk-")
-                .is_some_and(|id| id.bytes().all(|byte| byte.is_ascii_hexdigit()))
         );
     }
 
@@ -391,7 +566,6 @@ mod tests {
         let missing = report_is_retry_safe(&ExecuteReport {
             acknowledgements: vec![acknowledgement(AckState::Accepted)],
         });
-
         assert_eq!((failed, missing), (false, false));
     }
 
@@ -408,7 +582,6 @@ mod tests {
                 .expect("report text should be present"),
         )
         .expect("report text should be JSON");
-
         payload["retry_safe"]
             .as_bool()
             .expect("retry_safe should be a boolean")
@@ -428,12 +601,16 @@ mod tests {
     fn receipt(effect: Effect) -> Receipt {
         Receipt {
             protocol_version: PROTOCOL_VERSION,
-            action_name: "move".to_string(),
+            action_name: "click".to_string(),
             action_hash: "0".repeat(64),
             started_at_ms: 1,
             finished_at_ms: 2,
             backend: "test".to_string(),
             fallback_chain: Vec::new(),
+            delivery_route: praefectus::DeliveryRoute::TargetAddressed,
+            session_isolation: praefectus::SessionIsolation::SharedDesktop,
+            interaction_mode: InteractionMode::Interactive,
+            context_preservation: praefectus::ContextPreservation::NotApplicable,
             effect,
             before: None,
             after: None,

@@ -34,6 +34,8 @@ const MAX_SCREENSHOT_BYTES: u64 = 64 * 1024 * 1024;
 enum ToolExecError {
     #[error("missing {0}")]
     Missing(&'static str),
+    #[error("invalid tool arguments")]
+    InvalidArguments,
     #[error("host I/O request failed")]
     Io(#[from] std::io::Error),
     #[error("action blocked in this mode")]
@@ -44,6 +46,10 @@ enum ToolExecError {
     Json(#[from] serde_json::Error),
     #[error("computer-use protocol request failed")]
     Praefectus(#[from] praefectus::ProtocolError),
+    #[error("semantic computer-use target is unavailable")]
+    Semantic(#[from] praefectus::semantic::SemanticError),
+    #[error("semantic computer-use backend is unavailable")]
+    SemanticUnavailable,
     #[error("raw coordinate actions are unavailable")]
     CoordinatesUnavailable,
     #[error("safe screenshot reference is unavailable")]
@@ -58,6 +64,18 @@ fn peekaboo() -> Peekaboo {
 }
 
 pub fn register_tools(table: &mut ToolTable) {
+    register_tools_with_semantic_capabilities(
+        table,
+        praefectus_adapter::supports_semantic_action("invoke"),
+        praefectus_adapter::supports_semantic_action("set_value"),
+    );
+}
+
+fn register_tools_with_semantic_capabilities(
+    table: &mut ToolTable,
+    semantic_click: bool,
+    semantic_set_value: bool,
+) {
     table.register(
         "folk_shell",
         "Run a shell command on the Folk Around host computer, not on the agent provider or remote model server",
@@ -124,10 +142,9 @@ pub fn register_tools(table: &mut ToolTable) {
     );
     table.register(
         "folk_see",
-        "Capture an image and cache a UI snapshot for the Folk Around host computer",
+        "Capture an image and Praefectus semantic observation for the Folk Around host computer",
         schema(
             &[
-                ("app", string_property("Optional app filter")),
                 ("mode", string_property("Capture mode: screen or window")),
                 ("retina", bool_property("Capture at retina scale")),
             ],
@@ -181,53 +198,55 @@ pub fn register_tools(table: &mut ToolTable) {
         "folk_screen_capture",
         "Capture the Folk Around host computer screen and return image metadata",
         schema(
-            &[
-                (
-                    "target",
-                    string_property("Capture target: display, window, or region"),
-                ),
-                ("x", number_property("Region x coordinate")),
-                ("y", number_property("Region y coordinate")),
-                ("width", number_property("Region width")),
-                ("height", number_property("Region height")),
-            ],
+            &[(
+                "target",
+                string_property("Capture target: display or window"),
+            )],
             &[],
         ),
         |args, mode| Ok(screen_capture(args, mode)),
     );
     table.register(
         "folk_ui_snapshot",
-        "Return structured app and window context for the Folk Around host computer",
+        "Return a Praefectus semantic observation with opaque element tags for the Folk Around host computer",
         empty_schema(),
         |_, mode| Ok(ui_snapshot(mode)),
     );
     table.register(
         "folk_click",
-        "Click a resolved UI element on the Folk Around host computer; raw coordinates require Praefectus artifact provenance",
-        schema(
+        "Invoke a Praefectus semantic element on the Folk Around host computer",
+        strict_schema(
             &[
                 (
-                    "element_id",
-                    string_property("Stable element ID from folk_ui_snapshot"),
+                    "operation_id",
+                    constrained_string_property(
+                        "Stable operation ID for durable at-most-once dispatch",
+                        1,
+                        256,
+                        "^[A-Za-z0-9_:-]+$",
+                    ),
                 ),
                 (
-                    "index",
-                    number_property("Stable snapshot element index from folk_see"),
+                    "observation_id",
+                    constrained_string_property(
+                        "Observation ID from folk_ui_snapshot",
+                        64,
+                        64,
+                        "^[0-9a-f]{64}$",
+                    ),
                 ),
                 (
-                    "snapshot",
-                    string_property("Optional snapshot id from folk_ui_snapshot"),
+                    "tag",
+                    constrained_string_property(
+                        "Opaque element tag from folk_ui_snapshot",
+                        2,
+                        5,
+                        "^e[0-9]{1,4}$",
+                    ),
                 ),
-                ("x", number_property("Screen x coordinate")),
-                ("y", number_property("Screen y coordinate")),
-                ("button", string_property("Mouse button: left or right")),
-                ("count", number_property("Click count")),
-                (
-                    "background",
-                    bool_property("Prefer AX/background click without focus steal"),
-                ),
+                ("interaction_mode", interaction_mode_property()),
             ],
-            &[],
+            &["operation_id", "observation_id", "tag", "interaction_mode"],
         ),
         |args, mode| Ok(click(args, mode)),
     );
@@ -348,20 +367,49 @@ pub fn register_tools(table: &mut ToolTable) {
     );
     table.register(
         "folk_set_value",
-        "Set the value of a resolved UI element on the Folk Around host computer",
-        schema(
+        "Set the value of an editable Praefectus semantic element on the Folk Around host computer",
+        strict_schema(
             &[
                 (
-                    "on",
-                    string_property("Stable element ID or label from folk_ui_snapshot"),
+                    "operation_id",
+                    constrained_string_property(
+                        "Stable operation ID for durable at-most-once dispatch",
+                        1,
+                        256,
+                        "^[A-Za-z0-9_:-]+$",
+                    ),
                 ),
-                ("value", string_property("Value to set")),
                 (
-                    "snapshot",
-                    string_property("Optional snapshot id from folk_ui_snapshot"),
+                    "observation_id",
+                    constrained_string_property(
+                        "Observation ID from folk_ui_snapshot",
+                        64,
+                        64,
+                        "^[0-9a-f]{64}$",
+                    ),
                 ),
+                (
+                    "tag",
+                    constrained_string_property(
+                        "Opaque element tag from folk_ui_snapshot",
+                        2,
+                        5,
+                        "^e[0-9]{1,4}$",
+                    ),
+                ),
+                (
+                    "value",
+                    constrained_string_property("Value to set", 0, 16 * 1024, "^[\\s\\S]*$"),
+                ),
+                ("interaction_mode", interaction_mode_property()),
             ],
-            &["on", "value"],
+            &[
+                "operation_id",
+                "observation_id",
+                "tag",
+                "value",
+                "interaction_mode",
+            ],
         ),
         |args, mode| Ok(set_value(args, mode)),
     );
@@ -476,10 +524,63 @@ pub fn register_tools(table: &mut ToolTable) {
         ),
         |args, mode| Ok(clean(args, mode)),
     );
+
+    let semantic_observation = semantic_click || semantic_set_value;
+    table.retain(|tool| match tool.name {
+        "folk_ui_snapshot" | "folk_see" => semantic_observation,
+        "folk_click" => semantic_click,
+        "folk_set_value" => semantic_set_value,
+        "folk_press"
+        | "folk_type"
+        | "folk_paste"
+        | "folk_hotkey"
+        | "folk_scroll"
+        | "folk_swipe"
+        | "folk_drag"
+        | "folk_move"
+        | "folk_perform_action"
+        | "folk_window"
+        | "folk_app"
+        | "folk_open"
+        | "folk_menu"
+        | "folk_sleep"
+        | "folk_clean"
+        | "folk_doctor" => false,
+        _ => true,
+    });
 }
 
 fn schema(fields: &[(&'static str, Value)], required: &[&'static str]) -> Value {
     object_schema(fields.iter().cloned().collect(), required)
+}
+
+fn strict_schema(fields: &[(&'static str, Value)], required: &[&'static str]) -> Value {
+    let mut value = schema(fields, required);
+    value["additionalProperties"] = Value::Bool(false);
+    value
+}
+
+fn constrained_string_property(
+    description: &'static str,
+    min_length: usize,
+    max_length: usize,
+    pattern: &'static str,
+) -> Value {
+    json!({
+        "type": "string",
+        "description": description,
+        "minLength": min_length,
+        "maxLength": max_length,
+        "pattern": pattern,
+    })
+}
+
+fn interaction_mode_property() -> Value {
+    json!({
+        "type": "string",
+        "description": "Delivery mode: interactive or background_only",
+        "enum": ["interactive", "background_only"],
+    })
 }
 
 fn bool_property(description: &'static str) -> Value {
@@ -581,29 +682,13 @@ fn screen_capture(args: Value, _mode: AccessMode) -> Value {
 
         ensure_screenshot_reference_supported()?;
         let target = str_arg(&args, "target").unwrap_or("display");
+        if !matches!(target, "display" | "window") {
+            return Err(ToolExecError::CoordinatesUnavailable);
+        }
         let artifact = folk_core::create_artifact_file()
             .map_err(|_| ToolExecError::ScreenshotReferenceUnavailable)?;
         let path = artifact.path;
-        let capture = if target == "region" {
-            let x = int_arg(&args, "x").unwrap_or(0);
-            let y = int_arg(&args, "y").unwrap_or(0);
-            let width = int_arg(&args, "width").unwrap_or(0);
-            let height = int_arg(&args, "height").unwrap_or(0);
-            if width > 0 && height > 0 {
-                peekaboo().image_region(
-                    Bounds {
-                        x,
-                        y,
-                        width,
-                        height,
-                    },
-                    Some(path.clone()),
-                    true,
-                )?
-            } else {
-                peekaboo().image(ImageMode::Screen, Some(path.clone()), true)?
-            }
-        } else if target == "window" {
+        let capture = if target == "window" {
             peekaboo().image(ImageMode::Window, Some(path.clone()), true)?
         } else {
             peekaboo().image(ImageMode::Screen, Some(path.clone()), true)?
@@ -640,25 +725,15 @@ fn image(args: Value, _mode: AccessMode) -> Value {
 fn see(args: Value, _mode: AccessMode) -> Value {
     let result = (|| {
         ensure_screenshot_reference_supported()?;
-        let app = str_arg(&args, "app");
         let capture_mode = ImageMode::parse_or_err(str_arg(&args, "mode").unwrap_or("screen"))?;
         let artifact = folk_core::create_artifact_file()
             .map_err(|_| ToolExecError::ScreenshotReferenceUnavailable)?;
         let path = artifact.path;
         let retina = args.get("retina").and_then(Value::as_bool).unwrap_or(true);
-        // see() assigns stable element indices.
-        // see may skip writing image when path is None; still try one capture for image payload.
-        let snapshot = peekaboo().see(app, capture_mode, Some(path.clone()), retina)?;
-        let capture = ImageCapture {
-            bytes: std::fs::metadata(&path)?.len(),
-            path,
-            mode: capture_mode,
-            mime_type: "image/png".to_string(),
-            ephemeral: false,
-        };
+        let observation = praefectus_adapter::observe_semantic()?;
+        let capture = peekaboo().image(capture_mode, Some(path), retina)?;
         let metadata = json!({
-            "snapshotId": snapshot.snapshot_id,
-            "elements": snapshot.elements,
+            "observation": observation,
             "mode": capture.mode,
         });
         image_result(metadata, &capture, &artifact.locator)
@@ -688,69 +763,24 @@ fn permissions(args: Value, mode: AccessMode) -> Value {
 
 fn ui_snapshot(_mode: AccessMode) -> Value {
     let result = (|| {
-        let elements = serde_json::to_value(peekaboo().ui_elements(None)?)?;
-        Ok(json_text_result(&json!({
-            "platform": "macos",
-            "elements": elements
-        })))
+        Ok(json_text_result(&serde_json::to_value(
+            praefectus_adapter::observe_semantic()?,
+        )?))
     })();
     flatten(result)
 }
 
 fn click(args: Value, mode: AccessMode) -> Value {
-    click_with_adapter(args, mode, praefectus_adapter::execute_click)
-}
-
-fn click_with_adapter(
-    args: Value,
-    mode: AccessMode,
-    execute_coordinate: impl FnOnce(
-        AccessMode,
-        i64,
-        i64,
-        &str,
-        u32,
-        bool,
-    ) -> Result<Option<Value>, ToolExecError>,
-) -> Value {
     let result = (|| {
         ensure_mutation(mode)?;
-        let target = if let Some(index) = int_arg(&args, "index") {
-            Target::Query {
-                query: format!("index={index}"),
-                snapshot: str_arg(&args, "snapshot").map(str::to_string),
-            }
-        } else if let Some(element_id) = str_arg(&args, "element_id") {
-            Target::Query {
-                query: element_id.to_string(),
-                snapshot: str_arg(&args, "snapshot").map(str::to_string),
-            }
-        } else {
-            Target::Point(Point {
-                x: int_arg(&args, "x").ok_or(ToolExecError::Missing("x"))?,
-                y: int_arg(&args, "y").ok_or(ToolExecError::Missing("y"))?,
-            })
-        };
-        let button = str_arg(&args, "button").unwrap_or("left");
-        let count = int_arg(&args, "count").unwrap_or(1).max(1) as u32;
-        let background = args
-            .get("background")
-            .and_then(Value::as_bool)
-            .unwrap_or(true);
-        if matches!(target, Target::Point(_))
-            && let Some(response) = execute_coordinate(
-                mode,
-                int_arg(&args, "x").ok_or(ToolExecError::Missing("x"))?,
-                int_arg(&args, "y").ok_or(ToolExecError::Missing("y"))?,
-                button,
-                count,
-                background,
-            )?
-        {
-            return Ok(response);
-        }
-        peekaboo().click_with_options(target, button, count, background)?;
-        Ok(text_result("clicked"))
+        ensure_semantic_args(&args, false)?;
+        let operation_id =
+            str_arg(&args, "operation_id").ok_or(ToolExecError::Missing("operation_id"))?;
+        let observation_id =
+            str_arg(&args, "observation_id").ok_or(ToolExecError::Missing("observation_id"))?;
+        let tag = str_arg(&args, "tag").ok_or(ToolExecError::Missing("tag"))?;
+        let interaction_mode = interaction_mode_arg(&args)?;
+        praefectus_adapter::execute_click(mode, operation_id, observation_id, tag, interaction_mode)
     })();
     flatten(result)
 }
@@ -883,17 +913,22 @@ fn move_pointer_with_adapter(
 fn set_value(args: Value, mode: AccessMode) -> Value {
     let result = (|| {
         ensure_mutation(mode)?;
-        let on = str_arg(&args, "on").ok_or(ToolExecError::Missing("on"))?;
-        let snapshot = str_arg(&args, "snapshot").map(str::to_string);
+        ensure_semantic_args(&args, true)?;
+        let operation_id =
+            str_arg(&args, "operation_id").ok_or(ToolExecError::Missing("operation_id"))?;
+        let observation_id =
+            str_arg(&args, "observation_id").ok_or(ToolExecError::Missing("observation_id"))?;
+        let tag = str_arg(&args, "tag").ok_or(ToolExecError::Missing("tag"))?;
         let value = str_arg(&args, "value").ok_or(ToolExecError::Missing("value"))?;
-        peekaboo().set_value(
-            Target::Query {
-                query: on.to_string(),
-                snapshot,
-            },
+        let interaction_mode = interaction_mode_arg(&args)?;
+        praefectus_adapter::execute_set_value(
+            mode,
+            operation_id,
+            observation_id,
+            tag,
             value,
-        )?;
-        Ok(text_result("value set"))
+            interaction_mode,
+        )
     })();
     flatten(result)
 }
@@ -1164,6 +1199,67 @@ fn str_arg<'a>(args: &'a Value, key: &str) -> Option<&'a str> {
     args.get(key)?.as_str()
 }
 
+fn ensure_exact_args(args: &Value, allowed: &[&str]) -> Result<(), ToolExecError> {
+    let arguments = args.as_object().ok_or(ToolExecError::InvalidArguments)?;
+    if arguments.keys().all(|key| allowed.contains(&key.as_str())) {
+        Ok(())
+    } else {
+        Err(ToolExecError::InvalidArguments)
+    }
+}
+
+fn ensure_semantic_args(args: &Value, set_value: bool) -> Result<(), ToolExecError> {
+    let allowed = if set_value {
+        &[
+            "operation_id",
+            "observation_id",
+            "tag",
+            "value",
+            "interaction_mode",
+        ][..]
+    } else {
+        &["operation_id", "observation_id", "tag", "interaction_mode"][..]
+    };
+    ensure_exact_args(args, allowed)?;
+    let operation_id = str_arg(args, "operation_id").ok_or(ToolExecError::InvalidArguments)?;
+    let observation_id = str_arg(args, "observation_id").ok_or(ToolExecError::InvalidArguments)?;
+    let tag = str_arg(args, "tag").ok_or(ToolExecError::InvalidArguments)?;
+    let valid_operation_id = !operation_id.is_empty()
+        && operation_id.len() <= 256
+        && operation_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b':'));
+    let valid_observation_id = observation_id.len() == 64
+        && observation_id
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte));
+    let valid_tag = tag.strip_prefix('e').is_some_and(|index| {
+        !index.is_empty() && index.len() <= 4 && index.bytes().all(|byte| byte.is_ascii_digit())
+    });
+    let valid_value =
+        !set_value || str_arg(args, "value").is_some_and(|value| value.len() <= 16 * 1024);
+    let valid_interaction_mode = str_arg(args, "interaction_mode")
+        .is_some_and(|mode| matches!(mode, "interactive" | "background_only"));
+    if valid_operation_id
+        && valid_observation_id
+        && valid_tag
+        && valid_value
+        && valid_interaction_mode
+    {
+        Ok(())
+    } else {
+        Err(ToolExecError::InvalidArguments)
+    }
+}
+
+fn interaction_mode_arg(args: &Value) -> Result<praefectus::InteractionMode, ToolExecError> {
+    match str_arg(args, "interaction_mode") {
+        Some("interactive") => Ok(praefectus::InteractionMode::Interactive),
+        Some("background_only") => Ok(praefectus::InteractionMode::BackgroundOnly),
+        _ => Err(ToolExecError::InvalidArguments),
+    }
+}
+
 fn int_arg(args: &Value, key: &str) -> Option<i64> {
     args.get(key)?
         .as_i64()
@@ -1221,7 +1317,6 @@ impl From<ToolExecError> for ToolError {
 mod tests {
     use super::*;
     use folk_mcp::handle_message;
-    use std::cell::Cell;
 
     #[test]
     fn sandbox_shell_should_match_legacy_safe_command_behavior() {
@@ -1268,110 +1363,102 @@ mod tests {
     }
 
     #[test]
-    fn sandbox_mutation_should_be_blocked_for_computer_use() {
+    fn unsupported_ui_effects_are_not_advertised_in_sandbox() {
         let mut table = ToolTable::new(AccessMode::Sandbox);
         register_tools(&mut table);
-        let response = handle_message(
-            false,
-            &table,
-            json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"folk_type","arguments":{"text":"hi"}}}),
-        )
-        .unwrap()
-        .unwrap();
-        assert!(response.contains("action blocked in this mode"));
+        assert!(table.list().iter().all(|tool| tool.name != "folk_type"));
     }
 
     #[test]
-    fn limited_mutation_should_be_blocked_for_computer_use() {
+    fn unsupported_ui_effects_are_not_advertised_in_limited() {
         let mut table = ToolTable::new(AccessMode::Limited);
         register_tools(&mut table);
+        assert!(table.list().iter().all(|tool| tool.name != "folk_type"));
+    }
+
+    #[test]
+    fn advertised_semantic_tools_never_expose_coordinates() {
+        let mut table = ToolTable::new(AccessMode::Full);
+        register_tools_with_semantic_capabilities(&mut table, true, true);
+        let tools = table
+            .list()
+            .iter()
+            .filter(|tool| matches!(tool.name, "folk_click" | "folk_set_value"))
+            .collect::<Vec<_>>();
+        assert_eq!(tools.len(), 2);
+        for tool in tools {
+            assert_eq!(tool.input_schema["additionalProperties"], false);
+            let properties = tool.input_schema["properties"].as_object().unwrap();
+            assert!(properties.contains_key("operation_id"));
+            assert!(properties.contains_key("observation_id"));
+            assert!(properties.contains_key("tag"));
+            assert_eq!(
+                properties["interaction_mode"]["enum"],
+                json!(["interactive", "background_only"])
+            );
+            assert_eq!(properties["operation_id"]["maxLength"], 256);
+            assert_eq!(properties["observation_id"]["pattern"], "^[0-9a-f]{64}$");
+            assert_eq!(properties["tag"]["pattern"], "^e[0-9]{1,4}$");
+            assert!(!properties.contains_key("x"));
+            assert!(!properties.contains_key("y"));
+            assert!(!properties.contains_key("selector"));
+        }
+    }
+
+    #[test]
+    fn semantic_effects_reject_unknown_arguments_before_target_resolution() {
+        let mut table = ToolTable::new(AccessMode::Full);
+        register_tools_with_semantic_capabilities(&mut table, true, true);
         let response = handle_message(
             false,
             &table,
-            json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"folk_type","arguments":{"text":"hi"}}}),
+            json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"folk_click","arguments":{"operation_id":"op","observation_id":"missing","tag":"e0","x":1}}}),
         )
         .unwrap()
         .unwrap();
-        assert!(response.contains("action blocked in this mode"));
+
+        assert!(response.contains("invalid tool arguments"));
+        assert!(!response.contains("semantic computer-use target is unavailable"));
     }
 
     #[test]
-    fn restricted_coordinate_tools_should_not_route_through_adapter() {
-        let calls = Cell::new(0_u32);
-        let mut responses = Vec::new();
-        for mode in [AccessMode::Limited, AccessMode::Sandbox] {
-            responses.push(click_with_adapter(
-                json!({ "x": 10, "y": 20 }),
-                mode,
-                |_, _, _, _, _, _| {
-                    calls.set(calls.get() + 1);
-                    Ok(Some(text_result("adapter called")))
-                },
-            ));
-            responses.push(move_pointer_with_adapter(
-                json!({ "x": 10, "y": 20 }),
-                mode,
-                |_, _, _| {
-                    calls.set(calls.get() + 1);
-                    Ok(Some(text_result("adapter called")))
-                },
-            ));
-        }
-
+    fn semantic_effect_argument_bounds_match_the_protocol() {
+        let observation_id = "a".repeat(64);
         assert!(
-            calls.get() == 0
-                && responses.iter().all(|response| {
-                    response.to_string().contains("action blocked in this mode")
-                })
+            ensure_semantic_args(
+                &json!({"operation_id":"op:1","observation_id":observation_id,"tag":"e4095","interaction_mode":"interactive"}),
+                false,
+            )
+            .is_ok()
         );
-    }
-
-    #[test]
-    fn full_coordinate_tools_fail_closed_when_adapter_is_unavailable() {
-        let calls = Cell::new(0_u32);
-        let click_response = click_with_adapter(
-            json!({ "x": 10, "y": 20, "button": "right", "count": 2, "background": false }),
-            AccessMode::Full,
-            |mode, x, y, button, count, background| {
-                assert_eq!(
-                    (mode, x, y, button, count, background),
-                    (AccessMode::Full, 10, 20, "right", 2, false)
-                );
-                calls.set(calls.get() + 1);
-                Err(ToolExecError::CoordinatesUnavailable)
-            },
-        );
-        let move_response = move_pointer_with_adapter(
-            json!({ "x": 30, "y": 40 }),
-            AccessMode::Full,
-            |mode, x, y| {
-                assert_eq!((mode, x, y), (AccessMode::Full, 30, 40));
-                calls.set(calls.get() + 1);
-                Err(ToolExecError::CoordinatesUnavailable)
-            },
-        );
-
-        assert_eq!(calls.get(), 2);
-        for response in [click_response, move_response] {
-            assert!(
-                response
-                    .to_string()
-                    .contains("raw coordinate actions are unavailable")
-            );
+        for invalid in [
+            json!({"operation_id":"bad/id","observation_id":"a".repeat(64),"tag":"e0","interaction_mode":"interactive"}),
+            json!({"operation_id":"op","observation_id":"A".repeat(64),"tag":"e0","interaction_mode":"interactive"}),
+            json!({"operation_id":"op","observation_id":"a".repeat(64),"tag":"e12345","interaction_mode":"interactive"}),
+            json!({"operation_id":"op","observation_id":"a".repeat(64),"tag":"e0","interaction_mode":"unknown"}),
+            json!({"operation_id":"op","observation_id":"a".repeat(64),"tag":"e0","interaction_mode":"interactive","session_isolation":"host_isolated"}),
+            json!({"operation_id":"op","observation_id":"a".repeat(64),"tag":"e0","value":"x".repeat(16 * 1024 + 1),"interaction_mode":"interactive"}),
+        ] {
+            assert!(ensure_semantic_args(&invalid, invalid.get("value").is_some()).is_err());
         }
     }
 
     #[test]
-    fn full_swipe_and_drag_fail_closed_without_endpoint_provenance() {
-        for response in [
-            swipe(json!({ "from": "10,20", "to": "30,40" }), AccessMode::Full),
-            drag(json!({ "from": "10,20", "to": "30,40" }), AccessMode::Full),
-        ] {
-            assert!(
-                response
-                    .to_string()
-                    .contains("raw coordinate actions are unavailable")
-            );
+    fn host_mode_blocks_semantic_effects_before_argument_resolution() {
+        for mode in [AccessMode::Limited, AccessMode::Sandbox] {
+            let mut table = ToolTable::new(mode);
+            register_tools_with_semantic_capabilities(&mut table, true, true);
+            for name in ["folk_click", "folk_set_value"] {
+                let response = handle_message(
+                    false,
+                    &table,
+                    json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":name,"arguments":{}}}),
+                )
+                .unwrap()
+                .unwrap();
+                assert!(response.contains("action blocked in this mode"));
+                assert!(!response.contains("missing required argument"));
+            }
         }
     }
 
@@ -1506,49 +1593,48 @@ mod tests {
     }
 
     #[test]
-    fn tool_registration_should_cover_the_full_peekaboo_surface() {
+    fn tool_registration_reports_only_hardened_runtime_capabilities() {
         let mut table = ToolTable::new(AccessMode::Full);
-        register_tools(&mut table);
+        register_tools_with_semantic_capabilities(&mut table, false, false);
         let names = table
             .list()
             .iter()
             .map(|tool| tool.name)
             .collect::<Vec<_>>();
-        assert_eq!(
-            names,
-            vec![
-                "folk_shell",
-                "folk_system_info",
-                "folk_list_apps",
-                "folk_spawn",
-                "folk_image",
-                "folk_see",
-                "folk_list_screens",
-                "folk_clipboard_read",
-                "folk_clipboard_write",
-                "folk_permissions",
-                "folk_doctor",
-                "folk_screen_capture",
-                "folk_ui_snapshot",
-                "folk_click",
-                "folk_press",
-                "folk_type",
-                "folk_paste",
-                "folk_hotkey",
-                "folk_scroll",
-                "folk_swipe",
-                "folk_drag",
-                "folk_move",
-                "folk_set_value",
-                "folk_perform_action",
-                "folk_window",
-                "folk_app",
-                "folk_open",
-                "folk_menu",
-                "folk_sleep",
-                "folk_clean",
-            ]
-        );
+        for expected in [
+            "folk_shell",
+            "folk_system_info",
+            "folk_list_apps",
+            "folk_spawn",
+            "folk_image",
+            "folk_list_screens",
+            "folk_clipboard_read",
+            "folk_clipboard_write",
+            "folk_permissions",
+            "folk_screen_capture",
+        ] {
+            assert!(names.contains(&expected));
+        }
+        for unavailable in [
+            "folk_doctor",
+            "folk_press",
+            "folk_type",
+            "folk_paste",
+            "folk_hotkey",
+            "folk_scroll",
+            "folk_swipe",
+            "folk_drag",
+            "folk_move",
+            "folk_perform_action",
+            "folk_window",
+            "folk_app",
+            "folk_open",
+            "folk_menu",
+            "folk_sleep",
+            "folk_clean",
+        ] {
+            assert!(!names.contains(&unavailable));
+        }
         for tool in table
             .list()
             .iter()
@@ -1560,6 +1646,48 @@ mod tests {
                     .and_then(|value| value.get("path"))
                     .is_none()
             );
+        }
+    }
+
+    #[test]
+    fn runtime_semantic_capabilities_control_exact_tool_advertisement() {
+        let mut table = ToolTable::new(AccessMode::Full);
+        register_tools(&mut table);
+        let names = table
+            .list()
+            .iter()
+            .map(|tool| tool.name)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            names.contains(&"folk_click"),
+            praefectus_adapter::supports_semantic_action("invoke")
+        );
+        assert_eq!(
+            names.contains(&"folk_set_value"),
+            praefectus_adapter::supports_semantic_action("set_value")
+        );
+        assert_eq!(
+            names.contains(&"folk_ui_snapshot"),
+            praefectus_adapter::supports_semantic_action("invoke")
+                || praefectus_adapter::supports_semantic_action("set_value")
+        );
+    }
+
+    #[test]
+    fn semantic_capability_filter_does_not_advertise_a_different_effect() {
+        for (click, set_value) in [(true, false), (false, true)] {
+            let mut table = ToolTable::new(AccessMode::Full);
+            register_tools_with_semantic_capabilities(&mut table, click, set_value);
+            let names = table
+                .list()
+                .iter()
+                .map(|tool| tool.name)
+                .collect::<Vec<_>>();
+
+            assert_eq!(names.contains(&"folk_click"), click);
+            assert_eq!(names.contains(&"folk_set_value"), set_value);
+            assert!(names.contains(&"folk_ui_snapshot"));
         }
     }
 }

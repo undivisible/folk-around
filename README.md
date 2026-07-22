@@ -2,7 +2,7 @@
 
 https://folkaround.undivisible.dev
 
-Rust MCP agent for computer control. Shell, accessibility, clipboard, files, and `rs_peekaboo`-backed macOS automation over stdio, HTTP SSE, or Cloudflare signaling plus local HTTP.
+Rust MCP agent for computer control. Shell, semantic accessibility, clipboard, files, and bounded screen capture over stdio, HTTP SSE, or Cloudflare signaling plus local HTTP.
 
 ## what it is
 
@@ -26,17 +26,12 @@ folk-around --p2p                        # print pairing code, join signaling, s
 | folk_spawn | spawn background (full mode) |
 | folk_clipboard_read | read clipboard |
 | folk_clipboard_write | write to clipboard |
-| folk_screen_capture | capture to a private host-owned artifact and return its hash/locator |
-| folk_ui_snapshot | inspect app/window context |
-| folk_click | click a resolved UI element; raw coordinates fail closed without Praefectus provenance |
-| folk_type | type text |
-| folk_hotkey | press key combinations |
-| folk_scroll | scroll |
-| folk_window | list/focus/window actions |
-| folk_app | list/launch/activate/quit apps |
-| folk_menu | inspect/click menu items |
+| folk_screen_capture | capture a display or window to a private host-owned artifact and return its hash/locator |
+| folk_ui_snapshot | return a Praefectus semantic observation with opaque element tags when the runtime supports it |
+| folk_click | semantically invoke a tagged element from a current observation in full mode using a stable operation ID |
+| folk_set_value | set a tagged element value from a current semantic observation in full mode using a stable operation ID |
 
-Raw coordinate click, move, swipe, and drag requests fail closed when Praefectus does not report artifact-bound coordinate capture. Folk Around does not claim durable replay for those requests.
+Folk Around advertises semantic mutation tools only when Praefectus reports the exact runtime capability. It does not expose raw-coordinate or selector-based UI mutation tools, and unsupported UI effects are absent from the MCP tool table. Semantic mutations require a stable operation ID and an explicit `interaction_mode` of `interactive` or `background_only`: the same ID and action use Praefectus durable at-most-once dispatch, while the same ID with a different action or interaction mode conflicts. Background-only requests fail closed unless the host backend can preserve the shared desktop context; callers cannot assert host-isolated execution. Invoke receipts are explicitly unverified; set-value succeeds only when the fenced target reports the SHA-256 of the intended value. An uncertain outcome is returned as `outcome_unknown` with `retry_safe: false` and must not be retried automatically.
 Screenshot tools allocate files under the owner-only Folk Around artifact directory and never accept caller-selected paths or embed image bytes in MCP payloads.
 
 ## transports
@@ -71,7 +66,7 @@ Use the hosted Folk Around signalling server:
 folk-around --signal-server https://folkaround.undivisible.dev --room my-room
 ```
 
-The tools exposed through MCP always act on the computer running `folk-around`. Their tool descriptions say this explicitly so a remote agent understands that shell commands, clipboard access, process listing, screenshots, input events, app/window actions, and menu actions happen on the Folk Around host computer, not on the agent provider's own runtime.
+The tools exposed through MCP always act on the computer running `folk-around`. Their tool descriptions say this explicitly so a remote agent understands that shell commands, clipboard access, process listing, screenshots, and advertised semantic UI actions happen on the Folk Around host computer, not on the agent provider's own runtime.
 
 The last signaling server, pairing code, HTTP port, and mode are saved under `~/.config/folk-around/config`. Running `folk-around` with no transport flags reuses the saved HTTP port if one exists. Running `folk-around --p2p` reuses the last saved signaling server and pairing code unless you pass `--signal-server` or `--room <code>`.
 
@@ -109,8 +104,8 @@ sudo cp target/release/folk-around /usr/local/bin/
 
 | mode | shell | clipboard | observation | mutation |
 |------|-------|-----------|-------------|----------|
-| full | unrestricted | all | all | all |
-| limited | safe command allowlist | all | all | focus/list allowed |
+| full | unrestricted | all | all | advertised semantic effects |
+| limited | safe command allowlist | all | all | blocked |
 | sandbox | safe command allowlist | all | all | blocked |
 
 Safe cmds (limited and sandbox modes): ls, cat, grep, find, head, tail, wc, curl, echo, date, whoami, hostname, uname, which, pwd, ps, uptime, df, du
@@ -130,7 +125,7 @@ crates/
 ├── folk-core          config and access modes
 ├── folk-mcp           JSON-RPC MCP handling
 ├── folk-transport     stdio, HTTP SSE, and signaling relay
-└── folk-computer-use  shell, clipboard, and rs_peekaboo-backed computer-use tools
+└── folk-computer-use  shell, clipboard, Praefectus semantic actions, and bounded capture tools
 src/
 ├── main.zig        archived legacy entry, cli args (--mode, --http, --p2p, --signal-server, --room)
 ├── mcp.zig         legacy stdio MCP transport

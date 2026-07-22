@@ -28,8 +28,9 @@ sandbox — current compatibility behavior uses the same safe-shell command allo
 
 folk_shell, folk_system_info, folk_list_apps, folk_spawn,
 folk_clipboard_read, folk_clipboard_write, folk_screen_capture,
-folk_ui_snapshot, folk_click, folk_type, folk_hotkey, folk_scroll,
-folk_window, folk_app, folk_menu
+folk_ui_snapshot, folk_click, folk_set_value
+
+Semantic tools are advertised only when Praefectus reports the exact runtime capability. Invoke and set-value require full mode plus a stable operation ID, observation ID, opaque tag from folk_ui_snapshot, and an explicit interactive or background-only interaction mode. Reusing an operation ID with a different action or interaction mode conflicts. Background-only requests fail closed unless the host backend can preserve the shared desktop context. Callers cannot assert host-isolated execution. Raw coordinates and selectors are not accepted.
 
 ## Transports
 
