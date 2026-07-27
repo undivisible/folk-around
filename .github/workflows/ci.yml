@@ -10,7 +10,9 @@ jobs:
   rust:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6.0.3
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
 
       - name: Detect Rust manifest
         id: rust-manifest
@@ -35,7 +37,7 @@ jobs:
 
       - name: Rust build
         if: ${{ steps.rust-manifest.outputs.has_cargo == 'true' }}
-        run: cargo build --release --locked
+        run: cargo build --release --workspace --locked
 
       - name: Install Rust audit tools
         if: ${{ steps.rust-manifest.outputs.has_cargo == 'true' }}
@@ -58,10 +60,10 @@ jobs:
   signal-server:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6.0.3
+      - uses: actions/checkout@v4
 
       - name: Setup Bun
-        uses: oven-sh/setup-bun@v2.2.0
+        uses: oven-sh/setup-bun@v2
         with:
           bun-version: canary
 

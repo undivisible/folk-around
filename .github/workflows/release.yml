@@ -11,6 +11,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: dtolnay/rust-toolchain@stable
+
       - name: Rust format
         run: cargo fmt --all -- --check
 
@@ -21,7 +23,7 @@ jobs:
         run: cargo test --all-features --locked
 
       - name: Rust build
-        run: cargo build --release --locked
+        run: cargo build --release --workspace --locked
 
       - name: Install script test
         run: bash scripts/test-install.sh
@@ -82,8 +84,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Add Rust target
-        run: rustup target add ${{ matrix.target }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
 
       - name: Build Rust CLI
         run: cargo build --release --locked --target ${{ matrix.target }}
