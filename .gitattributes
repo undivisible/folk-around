@@ -15,3 +15,6 @@ src/** linguist-vendored
 build.zig linguist-vendored
 signal-server/dist/** linguist-generated
 zig-out/** linguist-generated
+
+# Exclude Shell from GitHub language statistics.
+*.sh linguist-detectable=false
