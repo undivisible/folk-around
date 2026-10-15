@@ -740,7 +740,7 @@ checksum = "5baebc0774151f905a1a2cc41989300b1e6fbb29aff0ceffa1064fdd3088d582"
 
 [[package]]
 name = "folk-around"
-version = "0.3.5"
+version = "0.3.6"
 dependencies = [
  "folk-computer-use",
  "folk-core",
@@ -752,7 +752,7 @@ dependencies = [
 
 [[package]]
 name = "folk-computer-use"
-version = "0.3.5"
+version = "0.3.6"
 dependencies = [
  "ed25519-dalek",
  "folk-core",
@@ -767,7 +767,7 @@ dependencies = [
 
 [[package]]
 name = "folk-core"
-version = "0.3.5"
+version = "0.3.6"
 dependencies = [
  "rand 0.9.4",
  "thiserror",
@@ -775,7 +775,7 @@ dependencies = [
 
 [[package]]
 name = "folk-mcp"
-version = "0.3.5"
+version = "0.3.6"
 dependencies = [
  "folk-core",
  "serde",
@@ -785,7 +785,7 @@ dependencies = [
 
 [[package]]
 name = "folk-transport"
-version = "0.3.5"
+version = "0.3.6"
 dependencies = [
  "base64",
  "chacha20poly1305",
@@ -1514,9 +1514,9 @@ dependencies = [
 
 [[package]]
 name = "rustls"
-version = "0.23.40"
+version = "0.23.46"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ef86cd5876211988985292b91c96a8f2d298df24e75989a43a3c73f2d4d8168b"
+checksum = "48e13bd8c0e9365c43cfa5c9e8f9ad49d3c8444926c9aac819e0e4dc503c8fdf"
 dependencies = [
  "once_cell",
  "ring",
@@ -1549,9 +1549,9 @@ dependencies = [
 
 [[package]]
 name = "rustls-webpki"
-version = "0.103.13"
+version = "0.103.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "61c429a8649f110dddef65e2a5ad240f747e85f7758a6bccc7e5777bd33f756e"
+checksum = "f3c3cf1d8b1e7d4927e2d154c3fcb02979afb9939629c62cd9048d4f07b60ac2"
 dependencies = [
  "ring",
  "rustls-pki-types",
